@@ -2,7 +2,7 @@ name: Macau Weather Real-time Alert Monitor
 
 on:
   schedule:
-    # 每 5 小時重新喚醒一個 4.5 小時的輪詢任務
+    # 作為防呆機制（若自我觸發失敗，每 5 小時仍會兜底喚醒一次）
     - cron: '0 */5 * * *'
   workflow_dispatch:
 
@@ -11,13 +11,14 @@ env:
 
 concurrency:
   group: weather-realtime-monitor
-  cancel-in-progress: true
+  cancel-in-progress: false   # 避免新任務啟動時誤殺尚未收尾的任務
 
 jobs:
   poll-and-alert:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write
 
     steps:
       - name: 檢出倉庫代碼
@@ -37,7 +38,8 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          END_TIME=$(($(date +%s) + 16200))
+          # 運行 4 小時 45 分鐘 (17100 秒)，預留 15 分鐘收尾與交接
+          END_TIME=$(($(date +%s) + 17100))
           INTERVAL=60
 
           git config --global user.name "github-actions[bot]"
@@ -47,7 +49,7 @@ jobs:
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] 檢查 SMG XML 更新..."
             python app.py
 
-            # 若 state.json 有變更 (代表已發布過新時間點的警報)，自動提交保存狀態
+            # 若 state.json 有變更，自動提交保存狀態
             if [ -n "$(git status --porcelain state.json)" ]; then
               git add state.json
               git commit -m "chore: update alert state [skip ci]" || true
@@ -56,3 +58,11 @@ jobs:
 
             sleep $INTERVAL
           done
+
+      - name: 4.5 小時結束，立即無縫喚醒下一個任務
+        if: always()  # 確保時間到達後必定執行喚醒
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "4.5 小時輪詢週期結束，正在觸發新一輪監控..."
+          gh workflow run "Macau Weather Real-time Alert Monitor" --ref main || echo "觸發下一輪任務失敗"
