@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import math
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -55,14 +56,14 @@ def send_telegram(text: str):
     try:
         res = requests.post(url, json=payload, timeout=12)
         if res.status_code == 200:
-            print("🚀 Telegram 風力訊息發送成功！")
+            print("🚀 Telegram 訊息發送成功！")
         else:
             print(f"❌ Telegram 發送失敗: {res.status_code} - {res.text}")
     except Exception as e:
         print(f"❌ Telegram 請求異常: {e}")
 
 # ==========================================
-# 2. Parsing Helpers
+# 2. Parsing Helpers & Weather Formulas
 # ==========================================
 def clean_name(n):
     return (n.replace("市政", "").replace("氣象站", "").replace("站", "")
@@ -83,7 +84,49 @@ def parse_float(el):
         except: pass
     return None
 
-def fetch_smg_weather():
+def estimate_wbgt(ta, rh, w, uvi=0.0):
+    if ta is None or rh is None or w is None:
+        return None
+    try:
+        uvi_val = 0.0 if uvi is None else float(uvi)
+        rh_sqrt = math.sqrt(rh + 8.313659)
+        twb = (ta * math.atan(0.151977 * rh_sqrt)
+               + math.atan(ta + rh)
+               - math.atan(rh - 1.676331)
+               + 0.00391838 * (rh ** 1.5) * math.atan(0.023101 * rh)
+               - 4.686035)
+        tg = ta + (1.404 * uvi_val) - (0.111 * w)
+        wbgt = 0.7 * twb + 0.2 * tg + 0.1 * ta
+        return round(float(wbgt), 1)
+    except:
+        return None
+
+def calculate_apparent_temperature(ta, rh, w):
+    if ta is None or rh is None or w is None:
+        return None
+    try:
+        wind_speed_ms = w / 3.6
+        e = (rh / 100.0) * 6.105 * math.exp((17.27 * ta) / (237.7 + ta))
+        apparent_temp = (1.04 * ta) + (0.2 * e) - (0.65 * wind_speed_ms) - 2.7
+        return round(float(apparent_temp), 1)
+    except:
+        return None
+
+def fetch_smg_uvi():
+    url = "https://xml.smg.gov.mo/c_actualUVI.xml"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        res.encoding = 'utf-8'
+        root = ET.fromstring(res.content)
+        val_node = root.find('.//UVI') or root.find('.//Value')
+        if val_node is not None and val_node.text:
+            return float(val_node.text.strip())
+    except:
+        pass
+    return 0.0
+
+def fetch_smg_weather(current_uvi=0.0):
     url = "https://xml.smg.gov.mo/c_actualweather.xml"
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
@@ -111,7 +154,6 @@ def fetch_smg_weather():
     if not pub_dt:
         pub_dt = datetime.now(MACAU_TZ)
 
-    # 轉為 2026/11/04 20:00 MST 格式
     formatted_time_str = pub_dt.strftime("%Y/%m/%d %H:%M MST")
 
     stations = {}
@@ -158,13 +200,42 @@ def fetch_smg_weather():
                     if v_node is not None and v_node.text:
                         item['wind_dir'] = v_node.text.strip().upper()
 
+        ta = item['temp']
+        rh = item['humidity']
+        w = item['wind_speed'] or 0.0
+        item['apparent'] = calculate_apparent_temperature(ta, rh, w)
+        item['wbgt'] = estimate_wbgt(ta, rh, w, current_uvi)
+
         stations[target] = item
 
     return formatted_time_str, stations
 
+def get_display_width(s):
+    width = 0
+    for char in s:
+        width += 2 if '\u4e00' <= char <= '\u9fff' or '\u3000' <= char <= '\u303f' or '\uff01' <= char <= '\uffee' else 1
+    return width
+
 # ==========================================
-# 3. Wind Index & Bridge Metrics
+# 3. 蒲福氏風級與風力指數計算
 # ==========================================
+def get_beaufort_scale(v):
+    if v is None: return "--"
+    v = float(v)
+    if v <= 1.0: return "F0"
+    elif v <= 5.5: return "F1"
+    elif v <= 11.9: return "F2"
+    elif v <= 19.4: return "F3"
+    elif v <= 28.4: return "F4"
+    elif v <= 38.9: return "F5"
+    elif v <= 49.7: return "F6"
+    elif v <= 61.6: return "F7"
+    elif v <= 74.5: return "F8"
+    elif v <= 88.2: return "F9"
+    elif v <= 102.2: return "F10"
+    elif v <= 117.4: return "F11"
+    else: return "F12"
+
 def compute_wind_index(stations_data):
     land_ws, land_gust = [], []
     bridge_ws, bridge_gust = [], []
@@ -193,16 +264,11 @@ def compute_wind_index(stations_data):
     wind_idx = 0.56 * ((1.0 - Ur) * U + Ur * Ug) + 0.44 * ((1.0 - Vr) * V + Vr * Vg)
     idx_rounded = round(wind_idx, 2)
 
-    if idx_rounded <= 13.0:
-        level, grade = "L1", "輕微"
-    elif idx_rounded <= 24.0:
-        level, grade = "L2", "清勁"
-    elif idx_rounded <= 44.0:
-        level, grade = "L3", "強勁"
-    elif idx_rounded <= 74.0:
-        level, grade = "L4", "強烈"
-    else:
-        level, grade = "L5", "極強"
+    if idx_rounded <= 13.0: level, grade = "L1", "輕微"
+    elif idx_rounded <= 24.0: level, grade = "L2", "清勁"
+    elif idx_rounded <= 44.0: level, grade = "L3", "強勁"
+    elif idx_rounded <= 74.0: level, grade = "L4", "強烈"
+    else: level, grade = "L5", "極強"
 
     return {
         "index": idx_rounded,
@@ -213,73 +279,260 @@ def compute_wind_index(stations_data):
     }
 
 # ==========================================
-# 4. Wind Message Builder
+# 4. Message Builders (風力, 氣溫, 降雨)
 # ==========================================
+
+# --- 4.1 風力訊息 ---
 def build_wind_message(pub_time_str, stations):
     wind_info = compute_wind_index(stations)
 
-    # 站點單一歸類容器 (保持唯一出現與最高優先級)
-    tiers_wind = {"颶風": [], "暴風": [], "烈風": [], "強風": []}
-    tiers_gust = {"颶陣": [], "暴陣": [], "烈陣": [], "強陣": []}
+    tier_defs = [
+        ("颶風", lambda ws, g: ws is not None and ws >= 117.5),
+        ("暴風", lambda ws, g: ws is not None and 87.5 <= ws < 117.5),
+        ("烈風", lambda ws, g: ws is not None and 62.5 <= ws < 87.5),
+        ("強風", lambda ws, g: ws is not None and 40.5 <= ws < 62.5),
+        ("颶陣", lambda ws, g: g is not None and g >= 117.5),
+        ("暴陣", lambda ws, g: g is not None and 87.5 <= g < 117.5),
+        ("烈陣", lambda ws, g: g is not None and 62.5 <= g < 87.5),
+        ("強陣", lambda ws, g: g is not None and 40.5 <= g < 62.5),
+    ]
 
-    # 1. 平均風速優先級分配
-    for st_name, d in stations.items():
-        ws = d.get('wind_speed')
-        code = d.get('code', st_name)
-        if ws is None:
-            continue
-        if ws >= 117.5:
-            tiers_wind["颶風"].append(code)
-        elif ws >= 87.5:
-            tiers_wind["暴風"].append(code)
-        elif ws >= 62.5:
-            tiers_wind["烈風"].append(code)
-        elif ws >= 40.5:
-            tiers_wind["強風"].append(code)
+    tier_stations = {name: [] for name, _ in tier_defs}
+    assigned_stations = set()
 
-    # 2. 最高陣風優先級分配
-    for st_name, d in stations.items():
-        g = d.get('gust_speed')
-        code = d.get('code', st_name)
-        if g is None:
-            continue
-        if g >= 117.5:
-            tiers_gust["颶陣"].append(code)
-        elif g >= 87.5:
-            tiers_gust["暴陣"].append(code)
-        elif g >= 62.5:
-            tiers_gust["烈陣"].append(code)
-        elif g >= 0.5:
-            tiers_gust["強陣"].append(code)
+    for tier_name, condition in tier_defs:
+        for st_name, d in stations.items():
+            if st_name in assigned_stations:
+                continue
 
-    # 檢查是否有任何站點達標
-    total_hits = sum(len(v) for v in tiers_wind.values()) + sum(len(v) for v in tiers_gust.values())
-    if total_hits == 0:
+            ws = d.get('wind_speed')
+            g = d.get('gust_speed')
+
+            if condition(ws, g):
+                assigned_stations.add(st_name)
+                code = d.get('code', STATION_COORDS.get(st_name, {}).get('code', ''))
+                tier_stations[tier_name].append({
+                    "name": st_name,
+                    "code": code,
+                    "ws": ws,
+                    "gust": g,
+                    "ws_sort": float(ws) if ws is not None else -1.0,
+                    "gust_sort": float(g) if g is not None else -1.0
+                })
+
+    if not assigned_stations:
         return None
 
-    def fmt_line(label, codes):
-        code_str = f" {','.join(codes)}" if codes else ""
-        return f"{label}({len(codes)})：{code_str}"
-
     msg_lines = [
-        "#風力",
-        f"{pub_time_str}",
+        f"#風力 {pub_time_str}",
         f"風力指數：{wind_info['index']:.2f} ({wind_info['level']}, {wind_info['grade']})",
-        "",
-        fmt_line("颶風", tiers_wind["颶風"]),
-        fmt_line("颶陣", tiers_gust["颶陣"]),
-        fmt_line("暴風", tiers_wind["暴風"]),
-        fmt_line("暴陣", tiers_gust["暴陣"]),
-        fmt_line("烈風", tiers_wind["烈風"]),
-        fmt_line("烈陣", tiers_gust["烈陣"]),
-        fmt_line("強風", tiers_wind["強風"]),
-        fmt_line("強陣", tiers_gust["強陣"]),
+        ""
+    ]
+
+    TARGET_LABEL_WIDTH = 19
+
+    for tier_name, _ in tier_defs:
+        st_list = tier_stations[tier_name]
+        if not st_list:
+            continue
+
+        st_list.sort(key=lambda x: (x["ws_sort"], x["gust_sort"]), reverse=True)
+
+        group_lines = [f"<b>{tier_name}({len(st_list)})</b>", "<pre>"]
+        for item in st_list:
+            ws_val = item['ws']
+            g_val = item['gust']
+
+            ws_f = get_beaufort_scale(ws_val)
+            g_f = get_beaufort_scale(g_val)
+
+            ws_num_str = f"{int(round(ws_val))}" if ws_val is not None else "--"
+            g_num_str = f"{int(round(g_val))}" if g_val is not None else "--"
+
+            ws_col = f"{ws_num_str:>2} ({ws_f:<3})"
+            g_col = f"{g_num_str:>2} ({g_f:<3})"
+
+            label = f"{item['name']} ({item['code']})"
+            pad = " " * max(1, (TARGET_LABEL_WIDTH - get_display_width(label)))
+
+            group_lines.append(f"{label}{pad}{ws_col} | {g_col}")
+
+        group_lines.append("</pre>")
+        msg_lines.append("\n".join(group_lines))
+
+    msg_lines.extend([
         "",
         f"大橋平均風速：{wind_info['bridge_avg_ws']:.1f} km/h",
         f"大橋平均陣風：{wind_info['bridge_avg_gust']:.1f} km/h"
-    ]
+    ])
 
     return "\n".join(msg_lines)
+
+# --- 4.2 氣溫訊息 ---
+def build_temperature_message(pub_time_str, stations):
+    TARGET_WIDTH = 18
+
+    # 1. 氣溫歸類
+    temp_list = []
+    for st_name, d in stations.items():
+        t = d.get('temp')
+        if t is None: continue
+        code = d.get('code', '')
+        label = f"{st_name} ({code})"
+
+        # 優先順序及圖示判定
+        rank = None
+        icon = ""
+        if t >= 37.5:
+            rank, icon = 1, "🔴"
+        elif 35.5 <= t < 37.5:
+            rank, icon = 2, "🟠"
+        elif 32.5 <= t < 35.5:
+            rank, icon = 3, "🟡"
+        elif t <= 3.4:
+            rank, icon = 4, "🟣"
+        elif 3.5 <= t < 7.5:
+            rank, icon = 5, "🔵"
+        elif 7.5 <= t <= 12.4:
+            rank, icon = 6, "🟢"
+
+        if rank is not None:
+            temp_list.append({
+                "label": label,
+                "val": t,
+                "rank": rank,
+                "icon": icon
+            })
+
+    # 2. 體感溫度歸類
+    app_list = []
+    for st_name, d in stations.items():
+        at = d.get('apparent')
+        if at is None: continue
+        code = d.get('code', '')
+        label = f"{st_name} ({code})"
+
+        rank = None
+        icon = ""
+        if at >= 37.5:
+            rank, icon = 1, "🔴"
+        elif 35.5 <= at < 37.5:
+            rank, icon = 2, "🟠"
+        elif at <= 3.4:
+            rank, icon = 3, "🟣"
+        elif 3.5 <= at < 7.5:
+            rank, icon = 4, "🔵"
+
+        if rank is not None:
+            app_list.append({
+                "label": label,
+                "val": at,
+                "rank": rank,
+                "icon": icon
+            })
+
+    # 3. 暑熱指數歸類
+    wbgt_list = []
+    for st_name, d in stations.items():
+        wb = d.get('wbgt')
+        if wb is None: continue
+        code = d.get('code', '')
+        label = f"{st_name} ({code})"
+
+        rank = None
+        icon = ""
+        if wb >= 32.5:
+            rank, icon = 1, "⚫"
+        elif 30.5 <= wb < 32.5:
+            rank, icon = 2, "🔴"
+        elif 29.5 <= wb < 30.5:
+            rank, icon = 3, "🟠"
+
+        if rank is not None:
+            wbgt_list.append({
+                "label": label,
+                "val": wb,
+                "rank": rank,
+                "icon": icon
+            })
+
+    # 若三大指標均未達標，則不推播
+    if not temp_list and not app_list and not wbgt_list:
+        return None
+
+    msg_sections = [f"#氣溫 {pub_time_str}"]
+
+    if temp_list:
+        # 高溫按降序，低溫按升序排
+        temp_list.sort(key=lambda x: (x["rank"], -x["val"] if x["rank"] <= 3 else x["val"]))
+        lines = ["<b>氣溫</b>", "<pre>"]
+        for item in temp_list:
+            pad = " " * max(1, TARGET_WIDTH - get_display_width(item['label']))
+            lines.append(f"{item['label']}{pad}{item['val']:>4.1f} °C {item['icon']}")
+        lines.append("</pre>")
+        msg_sections.append("\n".join(lines))
+
+    if app_list:
+        app_list.sort(key=lambda x: (x["rank"], -x["val"] if x["rank"] <= 2 else x["val"]))
+        lines = ["<b>體感</b>", "<pre>"]
+        for item in app_list:
+            pad = " " * max(1, TARGET_WIDTH - get_display_width(item['label']))
+            lines.append(f"{item['label']}{pad}{item['val']:>4.1f} °C {item['icon']}")
+        lines.append("</pre>")
+        msg_sections.append("\n".join(lines))
+
+    if wbgt_list:
+        wbgt_list.sort(key=lambda x: (x["rank"], -x["val"]))
+        lines = ["<b>暑熱</b>", "<pre>"]
+        for item in wbgt_list:
+            pad = " " * max(1, TARGET_WIDTH - get_display_width(item['label']))
+            lines.append(f"{item['label']}{pad}{item['val']:>4.1f} {item['icon']}")
+        lines.append("</pre>")
+        msg_sections.append("\n".join(lines))
+
+    return "\n\n".join(msg_sections)
+
+# --- 4.3 降雨訊息 ---
+def build_rainfall_message(pub_time_str, stations):
+    TARGET_WIDTH = 18
+    rain_list = []
+
+    for st_name, d in stations.items():
+        r = d.get('rain_h')
+        if r is not None and r > 0.0:
+            code = d.get('code', '')
+            label = f"{st_name} ({code})"
+
+            # 雨量標籤圖示
+            icon = ""
+            if r >= 100.0:
+                icon = " 🟣"
+            elif 80.0 <= r < 100.0:
+                icon = " ⚫"
+            elif 50.0 <= r < 80.0:
+                icon = " 🔴"
+            elif 20.0 <= r < 50.0:
+                icon = " 🟡"
+
+            rain_list.append({
+                "label": label,
+                "val": r,
+                "icon": icon
+            })
+
+    if not rain_list:
+        return None
+
+    # 按降雨量降序排列 (Descending order)
+    rain_list.sort(key=lambda x: x["val"], reverse=True)
+
+    lines = [f"#降雨 {pub_time_str}", "<pre>"]
+    for item in rain_list:
+        pad = " " * max(1, TARGET_WIDTH - get_display_width(item['label']))
+        lines.append(f"{item['label']}{pad}{item['val']:>4.1f} mm{item['icon']}")
+    lines.append("</pre>")
+
+    return "\n".join(lines)
 
 # ==========================================
 # 5. Main Execution
@@ -301,7 +554,8 @@ def save_state(state):
         print(f"⚠️ 狀態寫入失敗: {e}")
 
 if __name__ == "__main__":
-    pub_time_str, stations = fetch_smg_weather()
+    current_uvi = fetch_smg_uvi()
+    pub_time_str, stations = fetch_smg_weather(current_uvi=current_uvi)
     if not pub_time_str or not stations:
         print("❌ 無法取得 SMG 數據，結束流程。")
         sys.exit(0)
@@ -316,13 +570,29 @@ if __name__ == "__main__":
 
     print(f"🔔 檢測到新發布數據: {pub_time_str}")
 
-    wind_message = build_wind_message(pub_time_str, stations)
+    # 分別構建三則訊息
+    wind_msg = build_wind_message(pub_time_str, stations)
+    temp_msg = build_temperature_message(pub_time_str, stations)
+    rain_msg = build_rainfall_message(pub_time_str, stations)
 
-    if wind_message:
+    # 滿足條件即各自發送獨立 Telegram 訊息
+    if wind_msg:
         print("📤 滿足風力警報標準，發送 Telegram 訊息...")
-        send_telegram(wind_message)
+        send_telegram(wind_msg)
     else:
-        print("ℹ️ 所有站點平均風與陣風均低於 40.5 km/h，無需發布風力通報。")
+        print("ℹ️ 未達風力推播標準。")
+
+    if temp_msg:
+        print("📤 滿足氣溫/體感/暑熱警報標準，發送 Telegram 訊息...")
+        send_telegram(temp_msg)
+    else:
+        print("ℹ️ 未達氣溫推播標準。")
+
+    if rain_msg:
+        print("📤 過去1小時雨量大於0，發送降雨 Telegram 訊息...")
+        send_telegram(rain_msg)
+    else:
+        print("ℹ️ 各站過去1小時雨量均為0。")
 
     state["last_pubdate"] = pub_time_str
     save_state(state)
