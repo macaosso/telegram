@@ -346,11 +346,16 @@ def build_wind_message(pub_time_str, stations):
             ws_f = get_beaufort_scale(ws_val)
             g_f = get_beaufort_scale(g_val)
 
-            ws_num_str = f"{int(round(ws_val))}" if ws_val is not None else "--"
-            g_num_str = f"{int(round(g_val))}" if g_val is not None else "--"
+            # 保留 1 位小數 (1 dp)，數值為 None 時填入 "--"
+            ws_num_str = f"{ws_val:>4.1f}" if ws_val is not None else "  --"
+            g_num_str = f"{g_val:>4.1f}" if g_val is not None else "  --"
 
-            ws_col = f"{ws_num_str:>2} ({ws_f:<3})"
-            g_col = f"{g_num_str:>2} ({g_f:<3})"
+            # 去除 <3 填充，維持 (F5)、(F10) 緊湊無尾隨空白
+            ws_scale_str = f"({ws_f})"
+            g_scale_str = f"({g_f})"
+
+            ws_col = f"{ws_num_str} {ws_scale_str:<5}"
+            g_col = f"{g_num_str} {g_scale_str:<5}"
 
             label = f"{item['name']} ({item['code']})"
             pad = " " * max(1, (TARGET_LABEL_WIDTH - get_display_width(label)))
