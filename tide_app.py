@@ -253,7 +253,7 @@ def build_tide_flood_message(record_time_str, tide_val, flood_map):
             lines.append(f"潮汐：{tide_val:.2f} m ⚠️")
             lines.append("")
             has_content = True
-        elif tide_val >= 3.00:
+        elif tide_val >= 2.00:
             lines.append(f"潮汐：{tide_val:.2f} m")
             lines.append("")
             has_content = True
