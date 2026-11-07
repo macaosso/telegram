@@ -34,7 +34,7 @@ jobs:
 
       - name: 執行高頻輪詢 (每 60 秒檢測 c_ftgms.xml)
         env:
-          tidefloodtoken: ${{ secrets.tidefloodtoken || secrets.TELEGRAM_BOT_TOKEN }}
+          tidefloodtoken: ${{ secrets.tidefloodtoken }}
         run: |
           END_TIME=$(($(date +%s) + 17100))
           INTERVAL=60
@@ -44,7 +44,7 @@ jobs:
 
           while [ $(date +%s) -lt $END_TIME ]; do
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] 檢查水位數據更新..."
-            python app.py
+            python tide_app.py
 
             if [ -n "$(git status --porcelain state.json)" ]; then
               git add state.json
