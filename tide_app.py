@@ -63,7 +63,41 @@ def send_telegram(text: str):
         print(f"❌ Telegram 請求異常: {e}")
 
 # ==========================================
-# 2. 解析 c_ftgms.xml (依據 RecordTime)
+# 2. 獲取海事及水務局 (DSAMA) 即時潮位
+# ==========================================
+def fetch_dsama_tide():
+    """優先透過 DSAMA API 獲取潮位，失敗時讀取本地 flood/tidedata.json"""
+    url = f"https://dsama.apigateway.data.gov.mo/currentTideXmlApi?_t={int(time.time())}"
+    headers = {
+        "Authorization": "APPCODE 09d43a591fba407fb862412970667de4",
+        "User-Agent": "Mozilla/5.0"
+    }
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code == 200 and res.content:
+            root = ET.fromstring(res.content)
+            raw_tide = root.findtext('.//recordTide')
+            if raw_tide and raw_tide.strip():
+                tide_m = round(float(raw_tide.strip()) / 100.0, 2)
+                return tide_m
+    except Exception as e:
+        print(f"⚠️ 請求 DSAMA 潮位 API 異常: {e}")
+
+    # 備選方案：從同專案的本地 flood/tidedata.json 讀取
+    if os.path.exists("flood/tidedata.json"):
+        try:
+            with open("flood/tidedata.json", "r", encoding="utf-8") as f:
+                d = json.load(f)
+                val = d.get("tide_m")
+                if val is not None:
+                    return float(val)
+        except Exception as e:
+            print(f"⚠️ 讀取 flood/tidedata.json 失敗: {e}")
+
+    return None
+
+# ==========================================
+# 3. 解析 c_ftgms.xml (依據各站 RecordTime)
 # ==========================================
 def parse_dt(raw_time):
     if not raw_time:
@@ -114,7 +148,7 @@ def parse_ftgms_xml(content_str):
             if val is None:
                 continue
 
-            # 潮位與水浸站區分
+            # 站點區分
             if "潮" in name or code in ["TIDE", "EXT", "KL", "WL"]:
                 tide_val = val
             else:
@@ -126,7 +160,6 @@ def parse_ftgms_xml(content_str):
                         break
 
     except ET.ParseError:
-        # 正則容錯解析模式
         record_times = re.findall(r'<RecordTime>([^<]+)</RecordTime>', content_str, re.IGNORECASE)
         for rt in record_times:
             rec_dt = parse_dt(rt)
@@ -164,7 +197,6 @@ def parse_ftgms_xml(content_str):
                         flood_map[c] = val
                         break
 
-    # 若未找到 RecordTime，嘗試讀取 SysPubdate
     if not latest_record_dt:
         sys_time_m = re.search(r'<SysPubdate>([^<]+)</SysPubdate>', content_str, re.IGNORECASE)
         if sys_time_m:
@@ -196,7 +228,7 @@ def fetch_smg_water_data():
     return None, None, {}
 
 # ==========================================
-# 3. 訊息生成與圖示邏輯
+# 4. 訊息生成與圖示邏輯
 # ==========================================
 def get_flood_icon(val):
     if val >= 2.50:
@@ -221,7 +253,7 @@ def build_tide_flood_message(record_time_str, tide_val, flood_map):
             lines.append(f"潮汐：{tide_val:.2f} m ⚠️")
             lines.append("")
             has_content = True
-        elif tide_val >= 2.00:
+        elif tide_val >= 3.00:
             lines.append(f"潮汐：{tide_val:.2f} m")
             lines.append("")
             has_content = True
@@ -244,7 +276,7 @@ def build_tide_flood_message(record_time_str, tide_val, flood_map):
     return "\n".join(lines).strip()
 
 # ==========================================
-# 4. 狀態儲存與主流程
+# 5. 狀態儲存與主流程
 # ==========================================
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -263,11 +295,19 @@ def save_state(state):
         print(f"⚠️ 狀態寫入失敗: {e}")
 
 if __name__ == "__main__":
-    record_time_str, tide_val, flood_map = fetch_smg_water_data()
+    record_time_str, smg_tide, flood_map = fetch_smg_water_data()
 
     if not record_time_str:
-        print("❌ 無法取得水位/潮位數據，結束運行。")
+        print("❌ 無法取得水位數據，結束運行。")
         sys.exit(0)
+
+    # 若 c_ftgms.xml 無潮位數據，自動向 DSAMA 潮位 API 或 flood/tidedata.json 獲取
+    tide_val = smg_tide if smg_tide is not None else fetch_dsama_tide()
+
+    print(f"📍 觀測時次 (RecordTime): {record_time_str}")
+    print(f"🌊 當前潮高 (Tide): {f'{tide_val:.2f} m' if tide_val is not None else '未獲取'}")
+    active_floods = {k: v for k, v in flood_map.items() if v > 0}
+    print(f"🚨 水浸站狀態: {f'檢測到 {len(active_floods)} 站水浸' if active_floods else '全線 0.00 m'}")
 
     state = load_state()
     last_record_time = state.get("last_record_time", "")
@@ -276,7 +316,7 @@ if __name__ == "__main__":
         print(f"ℹ️ RecordTime 尚未更新 (當前數據時次: {record_time_str})，略過。")
         sys.exit(0)
 
-    print(f"🔔 檢測到新時次數據 (RecordTime): {record_time_str}")
+    print(f"🔔 檢測到新時次數據，正在評估推播標準...")
 
     message = build_tide_flood_message(record_time_str, tide_val, flood_map)
 
