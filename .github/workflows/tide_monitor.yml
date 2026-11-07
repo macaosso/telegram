@@ -1,0 +1,68 @@
+name: Macau Tide & Flood Real-time Monitor
+
+on:
+  schedule:
+    # 兜底防呆排程：每 5 小時喚醒一次
+    - cron: '0 */5 * * *'
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Macau
+
+concurrency:
+  group: tide-flood-monitor
+  cancel-in-progress: false
+
+jobs:
+  poll-and-alert:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+      - name: 檢出倉庫代碼
+        uses: actions/checkout@v4
+
+      - name: 設定 Python 環境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 安裝依賴庫
+        run: |
+          pip install requests
+
+      - name: 執行高頻輪詢 (每 60 秒檢測水位 XML 更新)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || '9228555664:AAFcTGN-rlyR7bdE6mrc8Ic14UmISX3LWSc' }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || '-1004308045341' }}
+        run: |
+          # 單次執行 4 小時 45 分鐘 (17100 秒)，保留緩衝後自旋重啟
+          END_TIME=$(($(date +%s) + 17100))
+          INTERVAL=60
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          while [ $(date +%s) -lt $END_TIME ]; do
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 檢查 SMG 水位與潮位 XML..."
+            python tide_app.py
+
+            # 若 state.json 更新則提交狀態防重複發送
+            if [ -n "$(git status --porcelain state.json)" ]; then
+              git add state.json
+              git commit -m "chore: update water level alert state [skip ci]" || true
+              git push origin main || echo "Push skipped or retry on next run."
+            fi
+
+            sleep $INTERVAL
+          done
+
+      - name: 任務循環結束，無縫喚醒下一個任務
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "輪詢週期結束，正在自旋喚醒下一輪任務..."
+          gh workflow run "Macau Tide & Flood Real-time Monitor" --ref main || echo "觸發下一輪任務失敗"
