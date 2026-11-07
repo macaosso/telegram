@@ -216,7 +216,7 @@ def build_tide_flood_message(record_time_str, tide_val, flood_map):
     has_content = False
 
     # 潮汐邏輯 (< 3.00 m 不顯示；>= 3.10 m 顯示 ⚠️)
-    if tide_val is not None and tide_val >= 3.00:
+    if tide_val is not None and tide_val >= 2.20:
         warning_icon = " ⚠️" if tide_val >= 3.10 else ""
         lines.append(f"潮汐：{tide_val:.2f} m{warning_icon}")
         lines.append("")
