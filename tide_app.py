@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -8,12 +9,8 @@ import requests
 
 MACAU_TZ = ZoneInfo('Asia/Macau')
 STATE_FILE = "state.json"
+DATA_URL = "https://xml.dsmg.gov.mo/c_ftgms.xml"
 
-# 預設憑證（亦可由 GitHub Secrets / 環境變數覆寫）
-DEFAULT_BOT_TOKEN = "9228555664:AAFcTGN-rlyR7bdE6mrc8Ic14UmISX3LWSc"
-DEFAULT_CHAT_ID = "-1004308045341"
-
-# 依指定順序排列的水浸站點代碼與中文名稱
 ORDERED_FLOOD_STATIONS = [
     ("LSI", "內港北"),
     ("LPI", "內港"),
@@ -40,11 +37,11 @@ ORDERED_FLOOD_STATIONS = [
 # 1. Telegram Dispatch
 # ==========================================
 def send_telegram(text: str):
-    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", DEFAULT_BOT_TOKEN)
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID", DEFAULT_CHAT_ID)
+    bot_token = os.environ.get("tidefloodtoken")
+    chat_id = -1004308045341
 
     if not bot_token or not chat_id:
-        print("⚠️ 未檢測到有效的 TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID。")
+        print("⚠️ 未檢測到 TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID 環境變量，取消發送。")
         return
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -57,81 +54,117 @@ def send_telegram(text: str):
     try:
         res = requests.post(url, json=payload, timeout=12)
         if res.status_code == 200:
-            print("🚀 Telegram 水浸/潮汐警報發送成功！")
+            print("🚀 Telegram 訊息發送成功！")
         else:
             print(f"❌ Telegram 發送失敗: {res.status_code} - {res.text}")
     except Exception as e:
         print(f"❌ Telegram 請求異常: {e}")
 
 # ==========================================
-# 2. SMG XML Fetching & Parsing
+# 2. XML Fetching & Resilient Parsing
 # ==========================================
-def parse_val(text):
-    if not text:
-        return None
-    try:
-        return float(text.strip())
-    except ValueError:
-        return None
-
-def fetch_smg_water_data():
-    """
-    抓取 SMG 實時水位及潮位 XML (c_actualwaterlevel.xml)
-    """
-    url = "https://xml.smg.gov.mo/c_actualwaterlevel.xml"
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    try:
-        res = requests.get(url, headers=headers, timeout=10)
-        res.encoding = 'utf-8'
-        root = ET.fromstring(res.content)
-    except Exception as e:
-        print(f"❌ SMG 水位 XML 抓取失敗: {e}")
-        return None, None, {}
-
-    # 解析發布時間
-    pub_node = root.find('.//SysPubdate') or root.find('.//SysPubDate') or root.find('.//System/SysPubdate')
+def parse_water_content(content_str):
     pub_dt = None
-    if pub_node is not None and pub_node.text:
-        raw_time = pub_node.text.strip()
-        for fmt in ["%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M:%S"]:
+    tide_val = None
+    flood_map = {}
+
+    # 1. 提取時間標籤
+    time_match = re.search(r'<(?:SysPubdate|SysPubDate|syspubdate|PubDate|pubdate|time)>([^<]+)</', content_str, re.IGNORECASE)
+    if time_match:
+        raw_time = time_match.group(1).strip()
+        for fmt in ["%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S"]:
             try:
                 pub_dt = datetime.strptime(raw_time, fmt).replace(tzinfo=MACAU_TZ)
                 break
             except ValueError:
-                continue
+                pass
 
     if not pub_dt:
         pub_dt = datetime.now(MACAU_TZ)
 
     formatted_time = pub_dt.strftime("%Y/%m/%d %H:%M MST")
 
-    tide_val = None
-    flood_map = {}
+    # 2. 優先嘗試標準 XML 解析，解析失敗則以正則表達式作為後備
+    parsed_via_et = False
+    try:
+        root = ET.fromstring(content_str)
+        # 歷遍所有站點節點
+        stations = root.findall('.//station') or root.findall('.//Station') or root.findall('.//Item')
+        for st in stations:
+            code_el = st.find('code') or st.find('StationCode') or st.find('stationcode')
+            name_el = st.find('name') or st.find('stationname') or st.find('StationName')
+            val_el = st.find('value') or st.find('Value') or st.find('dValue') or st.find('waterlevel')
 
-    for st in root.findall('.//station'):
-        code_node = st.find('code') or st.find('StationCode') or st.find('stationcode')
-        name_node = st.find('stationname') or st.find('name')
-        val_node = st.find('Value') or st.find('dValue') or st.find('waterlevel')
+            code = code_el.text.strip().upper() if code_el is not None and code_el.text else ""
+            name = name_el.text.strip() if name_el is not None and name_el.text else ""
+            val = None
+            if val_el is not None and val_el.text:
+                try:
+                    val = float(val_el.text.strip())
+                except ValueError:
+                    val = None
 
-        code = code_node.text.strip().upper() if (code_node is not None and code_node.text) else ""
-        name = name_node.text.strip() if (name_node is not None and name_node.text) else ""
-        val = parse_val(val_node.text) if (val_node is not None and val_node.text) else None
+            if val is None:
+                continue
 
-        # 潮汐站辨識 (外港碼頭潮位站或以 Tide 標記)
-        if "潮" in name or code in ["TIDE", "EXT"]:
-            if val is not None:
+            if "潮" in name or code in ["TIDE", "EXT", "KL", "WL"]:
                 tide_val = val
-        else:
-            if code:
-                flood_map[code] = val
-            if name:
-                # 依站名備用匹配
+            else:
+                if code:
+                    flood_map[code] = val
+                for c, n in ORDERED_FLOOD_STATIONS:
+                    if n in name:
+                        flood_map[c] = val
+                        break
+        parsed_via_et = True
+    except ET.ParseError:
+        parsed_via_et = False
+
+    # 若 XML 格式不規範噴錯，切換至 Regex 區塊提取
+    if not parsed_via_et:
+        blocks = re.findall(r'<(?:station|Station|Item)[\s\S]*?</(?:station|Station|Item)>', content_str, re.IGNORECASE)
+        for block in blocks:
+            code_m = re.search(r'<(?:code|StationCode|stationcode)>([^<]+)</', block, re.IGNORECASE)
+            name_m = re.search(r'<(?:stationname|name|StationName)>([^<]+)</', block, re.IGNORECASE)
+            val_m = re.search(r'<(?:dValue|Value|value|waterlevel)>([^<]+)</', block, re.IGNORECASE)
+
+            code = code_m.group(1).strip().upper() if code_m else ""
+            name = name_m.group(1).strip() if name_m else ""
+            val = None
+            if val_m:
+                try:
+                    val = float(val_m.group(1).strip())
+                except ValueError:
+                    val = None
+
+            if val is None:
+                continue
+
+            if "潮" in name or code in ["TIDE", "EXT", "KL", "WL"]:
+                tide_val = val
+            else:
+                if code:
+                    flood_map[code] = val
                 for c, n in ORDERED_FLOOD_STATIONS:
                     if n in name:
                         flood_map[c] = val
                         break
 
     return formatted_time, tide_val, flood_map
+
+def fetch_smg_water_data():
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+    }
+    try:
+        res = requests.get(DATA_URL, headers=headers, timeout=12)
+        res.encoding = 'utf-8'
+        if res.status_code == 200 and res.text.strip():
+            return parse_water_content(res.text)
+    except Exception as e:
+        print(f"❌ 請求 {DATA_URL} 失敗: {e}")
+
+    return None, None, {}
 
 # ==========================================
 # 3. Message Builder
@@ -153,14 +186,12 @@ def build_tide_flood_message(pub_time_str, tide_val, flood_map):
     lines = [pub_time_str]
     has_content = False
 
-    # 1. 潮汐邏輯 (< 3.00 m 不顯示；>= 3.10 m 顯示 ⚠️)
-    if tide_val is not None and tide_val >= 2.60:
+    if tide_val is not None and tide_val >= 3.00:
         warning_icon = " ⚠️" if tide_val >= 3.10 else ""
         lines.append(f"潮汐：{tide_val:.2f} m{warning_icon}")
         lines.append("")
         has_content = True
 
-    # 2. 水浸邏輯 (0.00 m 不顯示)
     flood_lines = []
     for code, name in ORDERED_FLOOD_STATIONS:
         val = flood_map.get(code)
@@ -200,26 +231,25 @@ if __name__ == "__main__":
     pub_time_str, tide_val, flood_map = fetch_smg_water_data()
 
     if not pub_time_str:
-        print("❌ 無法取得 SMG 水位數據，結束運行。")
+        print("❌ 無法取得水位/潮位數據，結束運行。")
         sys.exit(0)
 
     state = load_state()
     last_pubdate = state.get("last_pubdate", "")
 
-    # 若 XML 時間未更新則跳過
     if pub_time_str == last_pubdate:
-        print(f"ℹ️ SMG 水位 XML 尚未更新 (當前時次: {pub_time_str})，跳過。")
+        print(f"ℹ️ 數據尚未更新 (當前時次: {pub_time_str})，略過。")
         sys.exit(0)
 
-    print(f"🔔 檢測到新水位發布數據: {pub_time_str}")
+    print(f"🔔 檢測到新時次數據: {pub_time_str}")
 
     message = build_tide_flood_message(pub_time_str, tide_val, flood_map)
 
     if message:
-        print("📤 滿足潮汐/水浸通報標準，發送 Telegram 訊息:\n" + message)
+        print("📤 滿足通報標準，發送 Telegram 訊息:\n" + message)
         send_telegram(message)
     else:
-        print("ℹ️ 潮汐 < 3.00 m 且所有站點水浸均為 0.00 m，略過推播。")
+        print("ℹ️ 潮汐 < 3.00 m 且水浸皆為 0.00 m，略過推播。")
 
     state["last_pubdate"] = pub_time_str
     save_state(state)
