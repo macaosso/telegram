@@ -49,7 +49,7 @@ jobs:
 
           while [ $(date +%s) -lt $END_TIME ]; do
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] 檢查 SMG XML 更新..."
-            python app.py
+            python wind_app.py
 
             # 若檢測到新數據 (state.json 或 wind.db 有變更)，提交保存狀態
             if [ -n "$(git status --porcelain state.json wind.db)" ]; then
