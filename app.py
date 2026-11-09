@@ -419,6 +419,7 @@ def compute_wind_index(stations_data):
 # ==========================================
 
 # --- 5.1 風力訊息（純文字排版，無 <pre>，特定等寬數字字型） ---
+# --- 5.1 風力訊息（純文字排版，無 <pre>，特定等寬數字字型） ---
 def build_wind_message(pub_time_str, pub_dt, stations):
     wind_info = compute_wind_index(stations)
 
@@ -459,9 +460,10 @@ def build_wind_message(pub_time_str, pub_dt, stations):
     if not assigned_stations:
         return None
 
+    w_idx_str = f"{wind_info['index']:.2f}"
     msg_lines = [
         f"#風力 {pub_time_str}",
-        f"風力指數：{to_mono(f'{wind_info[\"index\"]:.2f}')} ({wind_info['level']}, {wind_info['grade']})",
+        f"風力指數：{to_mono(w_idx_str)} ({wind_info['level']}, {wind_info['grade']})",
         ""
     ]
 
@@ -492,10 +494,13 @@ def build_wind_message(pub_time_str, pub_dt, stations):
 
         msg_lines.append("\n".join(group_lines))
 
+    avg_ws_str = f"{wind_info['bridge_avg_ws']:.1f}"
+    avg_gust_str = f"{wind_info['bridge_avg_gust']:.1f}"
+
     msg_lines.extend([
         "",
-        f"大橋平均風速：{to_mono(f'{wind_info[\"bridge_avg_ws\"]:.1f}')} km/h",
-        f"大橋平均陣風：{to_mono(f'{wind_info[\"bridge_avg_gust\"]:.1f}')} km/h"
+        f"大橋平均風速：{to_mono(avg_ws_str)} km/h",
+        f"大橋平均陣風：{to_mono(avg_gust_str)} km/h"
     ])
 
     # 判斷是否達到強風或以上（強風、烈風、暴風、颶風）
@@ -523,7 +528,7 @@ def build_wind_message(pub_time_str, pub_dt, stations):
         if tier_sub_items:
             bridge_lines.append("、".join(tier_sub_items))
 
-        # 2. 各大橋 24 小時極值純文字排版，採用圖片中的全形/等寬數字字型
+        # 2. 各大橋 24 小時極值純文字排版，採用等寬全形數字
         for b_name in BRIDGE_STATIONS:
             disp_name = STATION_COORDS.get(b_name, {}).get("disp", b_name)
 
