@@ -1,4 +1,4 @@
-name: Macau Weather Real-time Alert Monitor
+name: Wind Alert Monitor
 
 on:
   schedule:
