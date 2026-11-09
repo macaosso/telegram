@@ -418,8 +418,19 @@ def compute_wind_index(stations_data):
 # 5. Message Builders
 # ==========================================
 
-# --- 5.1 風力訊息（純文字排版，無 <pre>，特定等寬數字字型） ---
-# --- 5.1 風力訊息（純文字排版，無 <pre>，特定等寬數字字型） ---
+def format_bridge_col(val, time_str):
+    """格式化風速/陣風欄位，確保長度一致以對齊 | 符號"""
+    if val is not None:
+        v_int = round(val)
+        val_str = f"{v_int:>2}"
+        t_str = f"({time_str})"
+    else:
+        val_str = " --"
+        t_str = "(--:--)"
+    # 組合並轉換為全形等寬字元
+    return to_mono(f"{val_str} {t_str}")
+
+# --- 5.1 風力訊息 ---
 def build_wind_message(pub_time_str, pub_dt, stations):
     wind_info = compute_wind_index(stations)
 
@@ -467,7 +478,9 @@ def build_wind_message(pub_time_str, pub_dt, stations):
         ""
     ]
 
-    # 即時風力各分級列表（純文字，數字轉換為等寬字型）
+    TARGET_LABEL_WIDTH = 20
+
+    # 即時風力各分級列表
     for tier_name, _ in tier_defs:
         st_list = tier_stations[tier_name]
         if not st_list:
@@ -483,14 +496,17 @@ def build_wind_message(pub_time_str, pub_dt, stations):
             ws_f = get_beaufort_scale(ws_val)
             g_f = get_beaufort_scale(g_val)
 
-            ws_num_str = to_mono(f"{ws_val:.1f}") if ws_val is not None else "－－"
-            g_num_str = to_mono(f"{g_val:.1f}") if g_val is not None else "－－"
+            ws_num_str = to_mono(f"{ws_val:>4.1f}") if ws_val is not None else "　－－"
+            g_num_str = to_mono(f"{g_val:>4.1f}") if g_val is not None else "　－－"
 
             ws_str = f"{ws_num_str} ({ws_f})"
             g_str = f"{g_num_str} ({g_f})"
 
             label = f"{item['name']} ({item['code']})"
-            group_lines.append(f"{label}  {ws_str} ｜ {g_str}")
+            pad = " " * max(1, TARGET_LABEL_WIDTH - get_display_width(label))
+
+            # 使用 code 標籤賦予 monospace 字型並確保依 | 對齊
+            group_lines.append(f"<code>{label}{pad}{ws_str} ｜ {g_str}</code>")
 
         msg_lines.append("\n".join(group_lines))
 
@@ -513,7 +529,7 @@ def build_wind_message(pub_time_str, pub_dt, stations):
         max_idx_time_str = to_mono(f"({b_summary['max_index_time']})") if b_summary['max_index_time'] else "（－－:－－）"
 
         tc = b_summary["tier_counts"]
-        # 1. 若 7 中 0 則不顯示，僅保留大於 0 的等級
+        # 若 7 中 0 則不顯示
         tier_sub_items = []
         for t_name in ["颶風", "暴風", "烈風", "強風"]:
             count = tc[t_name]
@@ -528,9 +544,13 @@ def build_wind_message(pub_time_str, pub_dt, stations):
         if tier_sub_items:
             bridge_lines.append("、".join(tier_sub_items))
 
-        # 2. 各大橋 24 小時極值純文字排版，採用等寬全形數字
+        # 圖片規格對齊：橋名固定寬度，管線符號 | 垂直對齊
+        TARGET_BRIDGE_WIDTH = 16
+
         for b_name in BRIDGE_STATIONS:
             disp_name = STATION_COORDS.get(b_name, {}).get("disp", b_name)
+            name_width = get_display_width(disp_name)
+            pad = " " * max(1, TARGET_BRIDGE_WIDTH - name_width)
 
             st_info = b_summary["stations"].get(b_name, {})
             max_ws = st_info.get("max_ws")
@@ -538,10 +558,11 @@ def build_wind_message(pub_time_str, pub_dt, stations):
             max_g = st_info.get("max_g")
             max_g_t = st_info.get("max_g_time")
 
-            ws_part = to_mono(f"{round(max_ws):>2} ({max_ws_t})") if max_ws is not None else " －－ (－－:－－)"
-            g_part = to_mono(f"{round(max_g):>2} ({max_g_t})") if max_g is not None else " －－ (－－:－－)"
+            ws_part = format_bridge_col(max_ws, max_ws_t)
+            g_part = format_bridge_col(max_g, max_g_t)
 
-            bridge_lines.append(f"{disp_name}　{ws_part} ｜ {g_part}")
+            # 以 code 標籤輸出每一行，確保每列 | 完全重合對齊
+            bridge_lines.append(f"<code>{disp_name}{pad}{ws_part} ｜ {g_part}</code>")
 
         msg_lines.extend(bridge_lines)
 
