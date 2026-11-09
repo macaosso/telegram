@@ -38,20 +38,6 @@ BRIDGE_STATIONS = [
 ]
 
 # ==========================================
-# 0. 字體轉換（轉換為圖片中的全形/等寬數字與符號）
-# ==========================================
-MONO_MAP = {
-    '0': '０', '1': '１', '2': '２', '3': '３', '4': '４',
-    '5': '５', '6': '６', '7': '７', '8': '８', '9': '９',
-    ':': '：', '.': '．', '(': '（', ')': '）', '|': '｜',
-    '-': '－', ' ': '　'
-}
-
-def to_mono(text: str) -> str:
-    """將常規數字、冒號、括號等字元轉換為等寬字型樣式"""
-    return "".join(MONO_MAP.get(c, c) for c in str(text))
-
-# ==========================================
 # 1. Telegram Dispatch
 # ==========================================
 def send_telegram(text: str):
@@ -136,7 +122,6 @@ def query_24h_bridge_summary(pub_dt: datetime):
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
 
-        # 24小時最高風力指數
         cursor.execute("""
             SELECT wind_index, timestamp
             FROM wind_records
@@ -153,7 +138,6 @@ def query_24h_bridge_summary(pub_dt: datetime):
             except Exception:
                 summary["max_index_time"] = "--:--"
 
-        # 7 座大橋 24 小時內各自最高風速與最高陣風
         for b_name in BRIDGE_STATIONS:
             cursor.execute("""
                 SELECT wind_speed, timestamp
@@ -418,19 +402,7 @@ def compute_wind_index(stations_data):
 # 5. Message Builders
 # ==========================================
 
-def format_bridge_col(val, time_str):
-    """格式化風速/陣風欄位，確保長度一致以對齊 | 符號"""
-    if val is not None:
-        v_int = round(val)
-        val_str = f"{v_int:>2}"
-        t_str = f"({time_str})"
-    else:
-        val_str = " --"
-        t_str = "(--:--)"
-    # 組合並轉換為全形等寬字元
-    return to_mono(f"{val_str} {t_str}")
-
-# --- 5.1 風力訊息 ---
+# --- 5.1 風力訊息（使用標準 ASCII 半形數字與 <pre> 代碼塊對齊） ---
 def build_wind_message(pub_time_str, pub_dt, stations):
     wind_info = compute_wind_index(stations)
 
@@ -471,10 +443,10 @@ def build_wind_message(pub_time_str, pub_dt, stations):
     if not assigned_stations:
         return None
 
-    w_idx_str = f"{wind_info['index']:.2f}"
+    w_idx = wind_info['index']
     msg_lines = [
         f"#風力 {pub_time_str}",
-        f"風力指數：{to_mono(w_idx_str)} ({wind_info['level']}, {wind_info['grade']})",
+        f"風力指數：{w_idx:.2f} ({wind_info['level']}, {wind_info['grade']})",
         ""
     ]
 
@@ -488,7 +460,7 @@ def build_wind_message(pub_time_str, pub_dt, stations):
 
         st_list.sort(key=lambda x: (x["ws_sort"], x["gust_sort"]), reverse=True)
 
-        group_lines = [f"<b>#{tier_name}({to_mono(len(st_list))})</b>"]
+        group_lines = [f"<b>#{tier_name}({len(st_list)})</b>", "<pre>"]
         for item in st_list:
             ws_val = item['ws']
             g_val = item['gust']
@@ -496,8 +468,8 @@ def build_wind_message(pub_time_str, pub_dt, stations):
             ws_f = get_beaufort_scale(ws_val)
             g_f = get_beaufort_scale(g_val)
 
-            ws_num_str = to_mono(f"{ws_val:>4.1f}") if ws_val is not None else "　－－"
-            g_num_str = to_mono(f"{g_val:>4.1f}") if g_val is not None else "　－－"
+            ws_num_str = f"{ws_val:>4.1f}" if ws_val is not None else "  --"
+            g_num_str = f"{g_val:>4.1f}" if g_val is not None else "  --"
 
             ws_str = f"{ws_num_str} ({ws_f})"
             g_str = f"{g_num_str} ({g_f})"
@@ -505,42 +477,42 @@ def build_wind_message(pub_time_str, pub_dt, stations):
             label = f"{item['name']} ({item['code']})"
             pad = " " * max(1, TARGET_LABEL_WIDTH - get_display_width(label))
 
-            group_lines.append(f"<code>{label}{pad}{ws_str} ｜ {g_str}</code>")
+            group_lines.append(f"{label}{pad}{ws_str} | {g_str}")
 
+        group_lines.append("</pre>")
         msg_lines.append("\n".join(group_lines))
 
-    avg_ws_str = f"{wind_info['bridge_avg_ws']:.1f}"
-    avg_gust_str = f"{wind_info['bridge_avg_gust']:.1f}"
-
+    b_avg_ws = wind_info['bridge_avg_ws']
+    b_avg_gust = wind_info['bridge_avg_gust']
     msg_lines.extend([
         "",
-        f"大橋平均風速：{to_mono(avg_ws_str)} km/h",
-        f"大橋平均陣風：{to_mono(avg_gust_str)} km/h"
+        f"大橋平均風速：{b_avg_ws:.1f} km/h",
+        f"大橋平均陣風：{b_avg_gust:.1f} km/h"
     ])
 
-    # 移除 strong_wind_count 限制：只要風力訊息觸發發送，必定附加 24 小時大橋紀錄
+    # 24 小時大橋紀錄
     b_summary = query_24h_bridge_summary(pub_dt)
     max_idx_val = b_summary["max_index"]
-    max_idx_str = to_mono(f"{max_idx_val:.2f}") if max_idx_val is not None else "－－"
-    max_idx_time_str = to_mono(f"({b_summary['max_index_time']})") if b_summary['max_index_time'] else "（－－:－－）"
+    max_idx_str = f"{max_idx_val:.2f}" if max_idx_val is not None else "--"
+    max_idx_time_str = f"({b_summary['max_index_time']})" if b_summary['max_index_time'] else "(--:--)"
 
     tc = b_summary["tier_counts"]
-    # 7 中 0 則不顯示，只列出 > 0 的等級
     tier_sub_items = []
     for t_name in ["颶風", "暴風", "烈風", "強風"]:
         count = tc[t_name]
         if count > 0:
-            tier_sub_items.append(f"{t_name}７中{to_mono(count)}")
+            tier_sub_items.append(f"{t_name}7中{count}")
 
     bridge_lines = [
         "",
-        f"２４小時橋上最高風力指數：{max_idx_str} {max_idx_time_str}"
+        f"24小時橋上最高風力指數：{max_idx_str} {max_idx_time_str}"
     ]
 
     if tier_sub_items:
         bridge_lines.append("、".join(tier_sub_items))
 
-    # 大橋名稱包含代號時，最長為「嘉樂庇總督大橋 (PG)」（寬度 19）
+    # 按照參考圖片格式：站名、風速(時間) | 陣風(時間)
+    bridge_lines.append("<pre>")
     TARGET_BRIDGE_WIDTH = 20
 
     for b_name in BRIDGE_STATIONS:
@@ -555,16 +527,15 @@ def build_wind_message(pub_time_str, pub_dt, stations):
         max_g = st_info.get("max_g")
         max_g_t = st_info.get("max_g_time")
 
-        ws_part = format_bridge_col(max_ws, max_ws_t)
-        g_part = format_bridge_col(max_g, max_g_t)
+        ws_part = f"{round(max_ws):>2} ({max_ws_t})" if max_ws is not None else " -- (----)"
+        g_part = f"{round(max_g):>2} ({max_g_t})" if max_g is not None else " -- (----)"
 
-        # 輸出 <code>，確保縱向對齊在 | 符號
-        bridge_lines.append(f"<code>{label}{pad}{ws_part} ｜ {g_part}</code>")
+        bridge_lines.append(f"{label}{pad}{ws_part} | {g_part}")
 
+    bridge_lines.append("</pre>")
     msg_lines.extend(bridge_lines)
 
     return "\n".join(msg_lines)
-
 
 # --- 5.2 氣溫訊息 ---
 def build_temperature_message(pub_time_str, stations):
