@@ -330,11 +330,18 @@ def fetch_smg_weather(current_uvi=0.0):
 
     return formatted_time_str, pub_dt, stations
 
-def get_display_width(s):
+def get_cjk_width(s):
     width = 0
-    for char in s:
-        width += 2 if '\u4e00' <= char <= '\u9fff' or '\u3000' <= char <= '\u303f' or '\uff01' <= char <= '\uffee' else 1
+    for ch in s:
+        if '\u4e00' <= ch <= '\u9fff' or '\u3000' <= ch <= '\u303f' or '\uff01' <= ch <= '\uffee':
+            width += 2
+        else:
+            width += 1
     return width
+
+def pad_cjk(text, target_width):
+    w = get_cjk_width(text)
+    return text + (" " * max(0, target_width - w))
 
 # ==========================================
 # 4. 蒲福氏風級與風力指數計算
@@ -402,7 +409,7 @@ def compute_wind_index(stations_data):
 # 5. Message Builders
 # ==========================================
 
-# --- 5.1 風力訊息（使用標準 ASCII 半形數字與 <pre> 代碼塊對齊） ---
+# --- 5.1 風力訊息 ---
 def build_wind_message(pub_time_str, pub_dt, stations):
     wind_info = compute_wind_index(stations)
 
@@ -430,10 +437,10 @@ def build_wind_message(pub_time_str, pub_dt, stations):
 
             if condition(ws, g):
                 assigned_stations.add(st_name)
-                code = d.get('code', STATION_COORDS.get(st_name, {}).get('code', ''))
+                disp = d.get('disp', STATION_COORDS.get(st_name, {}).get('disp', st_name))
                 tier_stations[tier_name].append({
                     "name": st_name,
-                    "code": code,
+                    "disp": disp,
                     "ws": ws,
                     "gust": g,
                     "ws_sort": float(ws) if ws is not None else -1.0,
@@ -450,9 +457,8 @@ def build_wind_message(pub_time_str, pub_dt, stations):
         ""
     ]
 
-    TARGET_LABEL_WIDTH = 20
+    NAME_COL_WIDTH = 8 
 
-    # 即時風力各分級列表
     for tier_name, _ in tier_defs:
         st_list = tier_stations[tier_name]
         if not st_list:
@@ -468,16 +474,11 @@ def build_wind_message(pub_time_str, pub_dt, stations):
             ws_f = get_beaufort_scale(ws_val)
             g_f = get_beaufort_scale(g_val)
 
-            ws_num_str = f"{ws_val:>4.1f}" if ws_val is not None else "  --"
-            g_num_str = f"{g_val:>4.1f}" if g_val is not None else "  --"
+            ws_num = f"{ws_val:>4.1f}" if ws_val is not None else "  --"
+            g_num = f"{g_val:>4.1f}" if g_val is not None else "  --"
 
-            ws_str = f"{ws_num_str} ({ws_f})"
-            g_str = f"{g_num_str} ({g_f})"
-
-            label = f"{item['name']} ({item['code']})"
-            pad = " " * max(1, TARGET_LABEL_WIDTH - get_display_width(label))
-
-            group_lines.append(f"{label}{pad}{ws_str} | {g_str}")
+            label = pad_cjk(item['disp'], NAME_COL_WIDTH)
+            group_lines.append(f"{label} {ws_num} ({ws_f}) | {g_num} ({g_f})")
 
         group_lines.append("</pre>")
         msg_lines.append("\n".join(group_lines))
@@ -490,7 +491,6 @@ def build_wind_message(pub_time_str, pub_dt, stations):
         f"大橋平均陣風：{b_avg_gust:.1f} km/h"
     ])
 
-    # 24 小時大橋紀錄
     b_summary = query_24h_bridge_summary(pub_dt)
     max_idx_val = b_summary["max_index"]
     max_idx_str = f"{max_idx_val:.2f}" if max_idx_val is not None else "--"
@@ -511,26 +511,21 @@ def build_wind_message(pub_time_str, pub_dt, stations):
     if tier_sub_items:
         bridge_lines.append("、".join(tier_sub_items))
 
-    # 按照參考圖片格式：站名、風速(時間) | 陣風(時間)
     bridge_lines.append("<pre>")
-    TARGET_BRIDGE_WIDTH = 20
-
     for b_name in BRIDGE_STATIONS:
-        code = STATION_COORDS.get(b_name, {}).get("code", "")
-        label = f"{b_name} ({code})"
-        name_width = get_display_width(label)
-        pad = " " * max(1, TARGET_BRIDGE_WIDTH - name_width)
+        disp_name = STATION_COORDS.get(b_name, {}).get("disp", b_name)
+        label = pad_cjk(disp_name, NAME_COL_WIDTH)
 
         st_info = b_summary["stations"].get(b_name, {})
         max_ws = st_info.get("max_ws")
-        max_ws_t = st_info.get("max_ws_time")
+        max_ws_t = st_info.get("max_ws_time", "--:--")
         max_g = st_info.get("max_g")
-        max_g_t = st_info.get("max_g_time")
+        max_g_t = st_info.get("max_g_time", "--:--")
 
-        ws_part = f"{round(max_ws):>2} ({max_ws_t})" if max_ws is not None else " -- (----)"
-        g_part = f"{round(max_g):>2} ({max_g_t})" if max_g is not None else " -- (----)"
+        ws_str = f"{round(max_ws):>2} ({max_ws_t})" if max_ws is not None else " -- (--:--)"
+        g_str = f"{round(max_g):>2} ({max_g_t})" if max_g is not None else " -- (--:--)"
 
-        bridge_lines.append(f"{label}{pad}{ws_part} | {g_part}")
+        bridge_lines.append(f"{label} {ws_str} | {g_str}")
 
     bridge_lines.append("</pre>")
     msg_lines.extend(bridge_lines)
@@ -602,7 +597,7 @@ def build_temperature_message(pub_time_str, stations):
         temp_list.sort(key=lambda x: (x["rank"], -x["val"] if x["rank"] <= 3 else x["val"]))
         lines = ["<b>氣溫</b>", "<pre>"]
         for item in temp_list:
-            pad = " " * max(1, TARGET_WIDTH - get_display_width(item['label']))
+            pad = " " * max(1, TARGET_WIDTH - get_cjk_width(item['label']))
             lines.append(f"{item['label']}{pad}{item['val']:>4.1f} °C {item['icon']}")
         lines.append("</pre>")
         msg_sections.append("\n".join(lines))
@@ -611,7 +606,7 @@ def build_temperature_message(pub_time_str, stations):
         app_list.sort(key=lambda x: (x["rank"], -x["val"] if x["rank"] <= 2 else x["val"]))
         lines = ["<b>體感</b>", "<pre>"]
         for item in app_list:
-            pad = " " * max(1, TARGET_WIDTH - get_display_width(item['label']))
+            pad = " " * max(1, TARGET_WIDTH - get_cjk_width(item['label']))
             lines.append(f"{item['label']}{pad}{item['val']:>4.1f} °C {item['icon']}")
         lines.append("</pre>")
         msg_sections.append("\n".join(lines))
@@ -620,7 +615,7 @@ def build_temperature_message(pub_time_str, stations):
         wbgt_list.sort(key=lambda x: (x["rank"], -x["val"]))
         lines = ["<b>暑熱</b>", "<pre>"]
         for item in wbgt_list:
-            pad = " " * max(1, TARGET_WIDTH - get_display_width(item['label']))
+            pad = " " * max(1, TARGET_WIDTH - get_cjk_width(item['label']))
             lines.append(f"{item['label']}{pad}{item['val']:>4.1f} {item['icon']}")
         lines.append("</pre>")
         msg_sections.append("\n".join(lines))
@@ -653,7 +648,7 @@ def build_rainfall_message(pub_time_str, stations):
 
     lines = [f"#降雨 {pub_time_str}", "<pre>"]
     for item in rain_list:
-        pad = " " * max(1, TARGET_WIDTH - get_display_width(item['label']))
+        pad = " " * max(1, TARGET_WIDTH - get_cjk_width(item['label']))
         lines.append(f"{item['label']}{pad}{item['val']:>4.1f} mm{item['icon']}")
     lines.append("</pre>")
 
