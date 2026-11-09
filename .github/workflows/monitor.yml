@@ -2,7 +2,7 @@ name: Macau Weather Real-time Alert Monitor
 
 on:
   schedule:
-    # 作為防呆機制（若自我觸發失敗，每 5 小時仍會兜底喚醒一次）
+    # 防呆機制：若自我觸發失敗，每 5 小時仍會兜底喚醒一次
     - cron: '0 */5 * * *'
   workflow_dispatch:
 
@@ -23,6 +23,8 @@ jobs:
     steps:
       - name: 檢出倉庫代碼
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: 設定 Python 環境
         uses: actions/setup-python@v5
@@ -49,18 +51,34 @@ jobs:
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] 檢查 SMG XML 更新..."
             python app.py
 
-            # 若 state.json 有變更，自動提交保存狀態
-            if [ -n "$(git status --porcelain state.json)" ]; then
-              git add state.json
-              git commit -m "chore: update alert state [skip ci]" || true
-              git push origin main || echo "Push skipped or retry on next run."
+            # 若檢測到新數據 (state.json 或 wind.db 有變更)，提交保存狀態
+            if [ -n "$(git status --porcelain state.json wind.db)" ]; then
+              git add state.json wind.db
+              git commit -m "chore: sync weather state and wind db [skip ci]" || true
+              
+              # 推送前先 rebase 避免衝突
+              git pull --rebase origin main || true
+              git push origin main || echo "Push skipped, will retry on next run."
             fi
 
             sleep $INTERVAL
           done
 
+      - name: 最終數據保存 (收尾確保 wind.db 完整推回)
+        if: always()
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          if [ -n "$(git status --porcelain state.json wind.db)" ]; then
+            git add state.json wind.db
+            git commit -m "chore: final sync before handing over [skip ci]" || true
+            git pull --rebase origin main || true
+            git push origin main || echo "Final push failed."
+          fi
+
       - name: 4.5 小時結束，立即無縫喚醒下一個任務
-        if: always()  # 確保時間到達後必定執行喚醒
+        if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
