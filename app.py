@@ -288,7 +288,7 @@ def fetch_smg_weather(current_uvi=0.0):
 
         item = {
             "code": STATION_COORDS[target]["code"],
-            "disp": STATION_COORDS[target]["disp"],
+            "disp": target,  # 採用全名
             "temp": parse_float(st.find('Temperature')),
             "humidity": parse_float(st.find('Humidity')),
             "rain_h": 0.0,
@@ -331,6 +331,7 @@ def fetch_smg_weather(current_uvi=0.0):
     return formatted_time_str, pub_dt, stations
 
 def get_cjk_width(s):
+    """計算中英文混合字串的顯示寬度（中文字/全形=2，英數半形=1）"""
     width = 0
     for ch in s:
         if '\u4e00' <= ch <= '\u9fff' or '\u3000' <= ch <= '\u303f' or '\uff01' <= ch <= '\uffee':
@@ -339,12 +340,10 @@ def get_cjk_width(s):
             width += 1
     return width
 
-def pad_station(name):
-    """
-    澳門站名簡稱最長為 4 個字（如「友誼橋北」、「嘉樂庇橋」）。
-    不足 4 個字的站名補入全形空格 '\\u3000'，保證在 Monospace 下嚴格 1:1 對齊。
-    """
-    return name + ("\u3000" * max(0, 4 - len(name)))
+def pad_cjk(text, target_width):
+    """補齊半形空格，確保在等寬字型 (Monospace) 下寬度嚴格相等"""
+    w = get_cjk_width(text)
+    return text + (" " * max(1, target_width - w))
 
 # ==========================================
 # 4. 蒲福氏風級與風力指數計算
@@ -412,7 +411,7 @@ def compute_wind_index(stations_data):
 # 5. Message Builders
 # ==========================================
 
-# --- 5.1 風力訊息（純行內 <code> 渲染，無 Plaintext 框，完美還原加速大會字型） ---
+# --- 5.1 風力訊息（全文字套用 Monospace，全名+代號，群組間空行） ---
 def build_wind_message(pub_time_str, pub_dt, stations):
     wind_info = compute_wind_index(stations)
 
@@ -440,10 +439,10 @@ def build_wind_message(pub_time_str, pub_dt, stations):
 
             if condition(ws, g):
                 assigned_stations.add(st_name)
-                disp = d.get('disp', STATION_COORDS.get(st_name, {}).get('disp', st_name))
+                code = d.get('code', STATION_COORDS.get(st_name, {}).get('code', ''))
                 tier_stations[tier_name].append({
                     "name": st_name,
-                    "disp": disp,
+                    "code": code,
                     "ws": ws,
                     "gust": g,
                     "ws_sort": float(ws) if ws is not None else -1.0,
@@ -455,12 +454,16 @@ def build_wind_message(pub_time_str, pub_dt, stations):
 
     w_idx = wind_info['index']
     msg_lines = [
-        f"#風力 {pub_time_str}",
-        f"風力指數：{w_idx:.2f} ({wind_info['level']}, {wind_info['grade']})",
+        f"<code>#風力 {pub_time_str}</code>",
+        f"<code>風力指數：{w_idx:.2f} ({wind_info['level']}, {wind_info['grade']})</code>",
         ""
     ]
 
-    # 即時風力各分級列表
+    # 全名 + (CODE) 最長如「嘉樂庇總督大橋 (PG)」寬度為 19
+    FULL_NAME_WIDTH = 19
+
+    # 1. 各分級列表：每個分級群組之間空一行
+    active_tier_blocks = []
     for tier_name, _ in tier_defs:
         st_list = tier_stations[tier_name]
         if not st_list:
@@ -468,7 +471,7 @@ def build_wind_message(pub_time_str, pub_dt, stations):
 
         st_list.sort(key=lambda x: (x["ws_sort"], x["gust_sort"]), reverse=True)
 
-        group_lines = [f"<b>#{tier_name}({len(st_list)})</b>"]
+        group_lines = [f"<code>#{tier_name}({len(st_list)})</code>"]
         for item in st_list:
             ws_val = item['ws']
             g_val = item['gust']
@@ -479,21 +482,27 @@ def build_wind_message(pub_time_str, pub_dt, stations):
             ws_num = f"{ws_val:>4.1f}" if ws_val is not None else "  --"
             g_num = f"{g_val:>4.1f}" if g_val is not None else "  --"
 
-            label = pad_station(item['disp'])
-            # 使用行內 <code> 包覆整行，絕不會產生語言方塊，同時擁有 Monospace 字型
-            group_lines.append(f"<code>{label} {ws_num} ({ws_f}) | {g_num} ({g_f})</code>")
+            # 全名 + (代號)
+            label = f"{item['name']} ({item['code']})"
+            label_padded = pad_cjk(label, FULL_NAME_WIDTH)
 
-        msg_lines.append("\n".join(group_lines))
+            group_lines.append(f"<code>{label_padded} {ws_num} ({ws_f}) | {g_num} ({g_f})</code>")
 
+        active_tier_blocks.append("\n".join(group_lines))
+
+    # 以換行符空一行拼接不同群組
+    msg_lines.append("\n\n".join(active_tier_blocks))
+
+    # 大橋平均
     b_avg_ws = wind_info['bridge_avg_ws']
     b_avg_gust = wind_info['bridge_avg_gust']
     msg_lines.extend([
         "",
-        f"大橋平均風速：{b_avg_ws:.1f} km/h",
-        f"大橋平均陣風：{b_avg_gust:.1f} km/h"
+        f"<code>大橋平均風速：{b_avg_ws:.1f} km/h</code>",
+        f"<code>大橋平均陣風：{b_avg_gust:.1f} km/h</code>"
     ])
 
-    # 24 小時大橋紀錄
+    # 2. 24 小時大橋紀錄
     b_summary = query_24h_bridge_summary(pub_dt)
     max_idx_val = b_summary["max_index"]
     max_idx_str = f"{max_idx_val:.2f}" if max_idx_val is not None else "--"
@@ -508,15 +517,16 @@ def build_wind_message(pub_time_str, pub_dt, stations):
 
     bridge_lines = [
         "",
-        f"24小時橋上最高風力指數：{max_idx_str} {max_idx_time_str}"
+        f"<code>24小時橋上最高風力指數：{max_idx_str} {max_idx_time_str}</code>"
     ]
 
     if tier_sub_items:
-        bridge_lines.append("、".join(tier_sub_items))
+        bridge_lines.append(f"<code>{'、'.join(tier_sub_items)}</code>")
 
     for b_name in BRIDGE_STATIONS:
-        disp_name = STATION_COORDS.get(b_name, {}).get("disp", b_name)
-        label = pad_station(disp_name)
+        code = STATION_COORDS.get(b_name, {}).get("code", "")
+        label = f"{b_name} ({code})"
+        label_padded = pad_cjk(label, FULL_NAME_WIDTH)
 
         st_info = b_summary["stations"].get(b_name, {})
         max_ws = st_info.get("max_ws")
@@ -527,8 +537,7 @@ def build_wind_message(pub_time_str, pub_dt, stations):
         ws_str = f"{round(max_ws):>2} ({max_ws_t})" if max_ws is not None else " -- (--:--)"
         g_str = f"{round(max_g):>2} ({max_g_t})" if max_g is not None else " -- (--:--)"
 
-        # 同樣使用行內 <code> 包覆每一行
-        bridge_lines.append(f"<code>{label} {ws_str} | {g_str}</code>")
+        bridge_lines.append(f"<code>{label_padded} {ws_str} | {g_str}</code>")
 
     msg_lines.extend(bridge_lines)
 
@@ -536,7 +545,7 @@ def build_wind_message(pub_time_str, pub_dt, stations):
 
 # --- 5.2 氣溫訊息 ---
 def build_temperature_message(pub_time_str, stations):
-    TARGET_WIDTH = 18
+    TARGET_WIDTH = 19
 
     temp_list = []
     for st_name, d in stations.items():
@@ -593,11 +602,11 @@ def build_temperature_message(pub_time_str, stations):
     if not temp_list and not app_list and not wbgt_list:
         return None
 
-    msg_sections = [f"#氣溫 {pub_time_str}"]
+    msg_sections = [f"<code>#氣溫 {pub_time_str}</code>"]
 
     if temp_list:
         temp_list.sort(key=lambda x: (x["rank"], -x["val"] if x["rank"] <= 3 else x["val"]))
-        lines = ["<b>氣溫</b>"]
+        lines = ["<code>氣溫</code>"]
         for item in temp_list:
             pad = " " * max(1, TARGET_WIDTH - get_cjk_width(item['label']))
             lines.append(f"<code>{item['label']}{pad}{item['val']:>4.1f} °C {item['icon']}</code>")
@@ -605,7 +614,7 @@ def build_temperature_message(pub_time_str, stations):
 
     if app_list:
         app_list.sort(key=lambda x: (x["rank"], -x["val"] if x["rank"] <= 2 else x["val"]))
-        lines = ["<b>體感</b>"]
+        lines = ["<code>體感</code>"]
         for item in app_list:
             pad = " " * max(1, TARGET_WIDTH - get_cjk_width(item['label']))
             lines.append(f"<code>{item['label']}{pad}{item['val']:>4.1f} °C {item['icon']}</code>")
@@ -613,7 +622,7 @@ def build_temperature_message(pub_time_str, stations):
 
     if wbgt_list:
         wbgt_list.sort(key=lambda x: (x["rank"], -x["val"]))
-        lines = ["<b>暑熱</b>"]
+        lines = ["<code>暑熱</code>"]
         for item in wbgt_list:
             pad = " " * max(1, TARGET_WIDTH - get_cjk_width(item['label']))
             lines.append(f"<code>{item['label']}{pad}{item['val']:>4.1f} {item['icon']}</code>")
@@ -623,7 +632,7 @@ def build_temperature_message(pub_time_str, stations):
 
 # --- 5.3 降雨訊息 ---
 def build_rainfall_message(pub_time_str, stations):
-    TARGET_WIDTH = 18
+    TARGET_WIDTH = 19
     rain_list = []
 
     for st_name, d in stations.items():
@@ -645,7 +654,7 @@ def build_rainfall_message(pub_time_str, stations):
 
     rain_list.sort(key=lambda x: x["val"], reverse=True)
 
-    lines = [f"#降雨 {pub_time_str}"]
+    lines = [f"<code>#降雨 {pub_time_str}</code>"]
     for item in rain_list:
         pad = " " * max(1, TARGET_WIDTH - get_cjk_width(item['label']))
         lines.append(f"<code>{item['label']}{pad}{item['val']:>4.1f} mm{item['icon']}</code>")
