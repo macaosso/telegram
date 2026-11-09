@@ -536,7 +536,7 @@ def build_wind_message(pub_time_str, pub_dt, stations):
         bridge_lines.append(f"<code>{'、'.join(tier_sub_items)}</code>")
 
     # 依風速由大至小輸出 7 條跨海大橋站點
-    for st in summary_stations := b_summary["station_list"]:
+    for st in b_summary["station_list"]:
         label = f"{st['name']} ({st['code']})"
         label_padded = pad_cjk(label, FULL_NAME_WIDTH)
 
