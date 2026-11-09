@@ -1,0 +1,86 @@
+name: Temperature Monitor
+
+on:
+  schedule:
+    # 防呆機制：若自我觸發失敗，每 5 小時兜底喚醒一次
+    - cron: '0 */5 * * *'
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Macau
+
+concurrency:
+  group: temp-realtime-monitor
+  cancel-in-progress: false   # 避免新任務啟動時誤殺尚未收尾的任務
+
+jobs:
+  poll-and-alert:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+      - name: 檢出倉庫代碼
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 設定 Python 環境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 安裝依賴庫
+        run: |
+          pip install -r requirements.txt
+
+      - name: 執行高頻輪詢 (每 60 秒檢測一次 XML 更新)
+        env:
+          MO_TEMP_API: ${{ secrets.MO_TEMP_API }}
+          MO_TEMP_CHAT_ID: ${{ secrets.MO_TEMP_CHAT_ID }}
+        run: |
+          # 運行 4 小時 45 分鐘 (17100 秒)，預留 15 分鐘收尾與交接
+          END_TIME=$(($(date +%s) + 17100))
+          INTERVAL=60
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          while [ $(date +%s) -lt $END_TIME ]; do
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 檢查 SMG XML 更新..."
+            python temp_app.py
+
+            # 若檢測到新數據 (state.json 或 temp.db 有變更)，提交保存狀態
+            if [ -n "$(git status --porcelain state.json temp.db)" ]; then
+              git add state.json temp.db
+              git commit -m "chore: sync temp state and db [skip ci]" || true
+              
+              # 推送前先 rebase 避免衝突
+              git pull --rebase origin main || true
+              git push origin main || echo "Push skipped, will retry on next run."
+            fi
+
+            sleep $INTERVAL
+          done
+
+      - name: 最終數據保存 (收尾確保 temp.db 完整推回)
+        if: always()
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          if [ -n "$(git status --porcelain state.json temp.db)" ]; then
+            git add state.json temp.db
+            git commit -m "chore: final temp sync before handing over [skip ci]" || true
+            git pull --rebase origin main || true
+            git push origin main || echo "Final push failed."
+          fi
+
+      - name: 4.5 小時結束，立即無縫喚醒下一個任務
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "4.5 小時輪詢週期結束，正在觸發新一輪監控..."
+          gh workflow run "Temperature Monitor" --ref main || echo "觸發下一輪任務失敗"
