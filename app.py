@@ -505,7 +505,6 @@ def build_wind_message(pub_time_str, pub_dt, stations):
             label = f"{item['name']} ({item['code']})"
             pad = " " * max(1, TARGET_LABEL_WIDTH - get_display_width(label))
 
-            # 使用 code 標籤賦予 monospace 字型並確保依 | 對齊
             group_lines.append(f"<code>{label}{pad}{ws_str} ｜ {g_str}</code>")
 
         msg_lines.append("\n".join(group_lines))
@@ -519,54 +518,53 @@ def build_wind_message(pub_time_str, pub_dt, stations):
         f"大橋平均陣風：{to_mono(avg_gust_str)} km/h"
     ])
 
-    # 判斷是否達到強風或以上（強風、烈風、暴風、颶風）
-    strong_wind_count = sum(len(tier_stations[t]) for t in ["颶風", "暴風", "烈風", "強風"])
+    # 移除 strong_wind_count 限制：只要風力訊息觸發發送，必定附加 24 小時大橋紀錄
+    b_summary = query_24h_bridge_summary(pub_dt)
+    max_idx_val = b_summary["max_index"]
+    max_idx_str = to_mono(f"{max_idx_val:.2f}") if max_idx_val is not None else "－－"
+    max_idx_time_str = to_mono(f"({b_summary['max_index_time']})") if b_summary['max_index_time'] else "（－－:－－）"
 
-    if strong_wind_count >= 1:
-        b_summary = query_24h_bridge_summary(pub_dt)
-        max_idx_val = b_summary["max_index"]
-        max_idx_str = to_mono(f"{max_idx_val:.2f}") if max_idx_val is not None else "－－"
-        max_idx_time_str = to_mono(f"({b_summary['max_index_time']})") if b_summary['max_index_time'] else "（－－:－－）"
+    tc = b_summary["tier_counts"]
+    # 7 中 0 則不顯示，只列出 > 0 的等級
+    tier_sub_items = []
+    for t_name in ["颶風", "暴風", "烈風", "強風"]:
+        count = tc[t_name]
+        if count > 0:
+            tier_sub_items.append(f"{t_name}７中{to_mono(count)}")
 
-        tc = b_summary["tier_counts"]
-        # 若 7 中 0 則不顯示
-        tier_sub_items = []
-        for t_name in ["颶風", "暴風", "烈風", "強風"]:
-            count = tc[t_name]
-            if count > 0:
-                tier_sub_items.append(f"{t_name}７中{to_mono(count)}")
+    bridge_lines = [
+        "",
+        f"２４小時橋上最高風力指數：{max_idx_str} {max_idx_time_str}"
+    ]
 
-        bridge_lines = [
-            "",
-            f"２４小時橋上最高風力指數：{max_idx_str} {max_idx_time_str}"
-        ]
+    if tier_sub_items:
+        bridge_lines.append("、".join(tier_sub_items))
 
-        if tier_sub_items:
-            bridge_lines.append("、".join(tier_sub_items))
+    # 大橋名稱包含代號時，最長為「嘉樂庇總督大橋 (PG)」（寬度 19）
+    TARGET_BRIDGE_WIDTH = 20
 
-        # 圖片規格對齊：橋名固定寬度，管線符號 | 垂直對齊
-        TARGET_BRIDGE_WIDTH = 16
+    for b_name in BRIDGE_STATIONS:
+        code = STATION_COORDS.get(b_name, {}).get("code", "")
+        label = f"{b_name} ({code})"
+        name_width = get_display_width(label)
+        pad = " " * max(1, TARGET_BRIDGE_WIDTH - name_width)
 
-        for b_name in BRIDGE_STATIONS:
-            disp_name = STATION_COORDS.get(b_name, {}).get("disp", b_name)
-            name_width = get_display_width(disp_name)
-            pad = " " * max(1, TARGET_BRIDGE_WIDTH - name_width)
+        st_info = b_summary["stations"].get(b_name, {})
+        max_ws = st_info.get("max_ws")
+        max_ws_t = st_info.get("max_ws_time")
+        max_g = st_info.get("max_g")
+        max_g_t = st_info.get("max_g_time")
 
-            st_info = b_summary["stations"].get(b_name, {})
-            max_ws = st_info.get("max_ws")
-            max_ws_t = st_info.get("max_ws_time")
-            max_g = st_info.get("max_g")
-            max_g_t = st_info.get("max_g_time")
+        ws_part = format_bridge_col(max_ws, max_ws_t)
+        g_part = format_bridge_col(max_g, max_g_t)
 
-            ws_part = format_bridge_col(max_ws, max_ws_t)
-            g_part = format_bridge_col(max_g, max_g_t)
+        # 輸出 <code>，確保縱向對齊在 | 符號
+        bridge_lines.append(f"<code>{label}{pad}{ws_part} ｜ {g_part}</code>")
 
-            # 以 code 標籤輸出每一行，確保每列 | 完全重合對齊
-            bridge_lines.append(f"<code>{disp_name}{pad}{ws_part} ｜ {g_part}</code>")
-
-        msg_lines.extend(bridge_lines)
+    msg_lines.extend(bridge_lines)
 
     return "\n".join(msg_lines)
+
 
 # --- 5.2 氣溫訊息 ---
 def build_temperature_message(pub_time_str, stations):
