@@ -1,7 +1,6 @@
 import os
 import sys
 import json
-import math
 import sqlite3
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
@@ -107,9 +106,31 @@ def save_wind_data(pub_dt: datetime, stations_data: dict, wind_idx: float):
             INSERT INTO wind_records (timestamp, station_name, station_code, wind_speed, gust_speed, wind_index)
             VALUES (?, ?, ?, ?, ?, ?)
         """, rows)
-        # 僅保留最近 24 小時紀錄，避免 DB 無限膨脹
         cursor.execute("DELETE FROM wind_records WHERE timestamp < ?", (cutoff_str,))
         conn.commit()
+
+def query_past_hour_top3(pub_dt: datetime):
+    """
+    查詢過去 1 小時最高持續風速排名前 3 的測站，並取出該測站過去 1 小時內的最高風速與最高陣風。
+    """
+    cutoff_str = (pub_dt - timedelta(hours=1)).isoformat()
+
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT 
+                station_name, 
+                MAX(wind_speed) as max_ws, 
+                MAX(gust_speed) as max_gust
+            FROM wind_records
+            WHERE timestamp >= ? AND wind_speed IS NOT NULL
+            GROUP BY station_name
+            ORDER BY max_ws DESC, max_gust DESC
+            LIMIT 3
+        """, (cutoff_str,))
+        rows = cursor.fetchall()
+
+    return rows
 
 def query_24h_bridge_summary(pub_dt: datetime):
     cutoff_str = (pub_dt - timedelta(hours=24)).isoformat()
@@ -123,7 +144,6 @@ def query_24h_bridge_summary(pub_dt: datetime):
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
 
-        # 查詢過去 24 小時全澳最高風力指數
         cursor.execute("""
             SELECT wind_index, timestamp
             FROM wind_records
@@ -140,7 +160,6 @@ def query_24h_bridge_summary(pub_dt: datetime):
             except Exception:
                 summary["max_index_time"] = "--:--"
 
-        # 查詢各跨海大橋過去 24 小時極值
         for b_name in BRIDGE_STATIONS:
             cursor.execute("""
                 SELECT wind_speed, timestamp
@@ -177,7 +196,6 @@ def query_24h_bridge_summary(pub_dt: datetime):
                 "max_g_time": max_g_time
             })
 
-            # 計算各級風力達標測站數（最高持續風速達到該門檻）
             if max_ws is not None:
                 if max_ws >= 117.5:
                     summary["tier_counts"]["颶風"] += 1
@@ -188,7 +206,6 @@ def query_24h_bridge_summary(pub_dt: datetime):
                 elif max_ws >= 40.5:
                     summary["tier_counts"]["強風"] += 1
 
-    # 依過去 24 小時最高風速 (max_ws) 降序排列，風速相同則比陣風 (max_g)
     summary["station_list"].sort(
         key=lambda x: (
             x["max_ws"] if x["max_ws"] is not None else -1.0,
@@ -200,7 +217,7 @@ def query_24h_bridge_summary(pub_dt: datetime):
     return summary
 
 # ==========================================
-# 3. Parsing Helpers & Weather Formulas
+# 3. Parsing Helpers
 # ==========================================
 def clean_name(n):
     return (n.replace("市政", "").replace("氣象站", "").replace("站", "")
@@ -221,49 +238,7 @@ def parse_float(el):
         except: pass
     return None
 
-def estimate_wbgt(ta, rh, w, uvi=0.0):
-    if ta is None or rh is None or w is None:
-        return None
-    try:
-        uvi_val = 0.0 if uvi is None else float(uvi)
-        rh_sqrt = math.sqrt(rh + 8.313659)
-        twb = (ta * math.atan(0.151977 * rh_sqrt)
-               + math.atan(ta + rh)
-               - math.atan(rh - 1.676331)
-               + 0.00391838 * (rh ** 1.5) * math.atan(0.023101 * rh)
-               - 4.686035)
-        tg = ta + (1.404 * uvi_val) - (0.111 * w)
-        wbgt = 0.7 * twb + 0.2 * tg + 0.1 * ta
-        return round(float(wbgt), 1)
-    except:
-        return None
-
-def calculate_apparent_temperature(ta, rh, w):
-    if ta is None or rh is None or w is None:
-        return None
-    try:
-        wind_speed_ms = w / 3.6
-        e = (rh / 100.0) * 6.105 * math.exp((17.27 * ta) / (237.7 + ta))
-        apparent_temp = (1.04 * ta) + (0.2 * e) - (0.65 * wind_speed_ms) - 2.7
-        return round(float(apparent_temp), 1)
-    except:
-        return None
-
-def fetch_smg_uvi():
-    url = "https://xml.smg.gov.mo/c_actualUVI.xml"
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    try:
-        res = requests.get(url, headers=headers, timeout=10)
-        res.encoding = 'utf-8'
-        root = ET.fromstring(res.content)
-        val_node = root.find('.//UVI') or root.find('.//Value')
-        if val_node is not None and val_node.text:
-            return float(val_node.text.strip())
-    except:
-        pass
-    return 0.0
-
-def fetch_smg_weather(current_uvi=0.0):
+def fetch_smg_weather():
     url = "https://xml.smg.gov.mo/c_actualweather.xml"
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
@@ -306,20 +281,10 @@ def fetch_smg_weather(current_uvi=0.0):
         item = {
             "code": STATION_COORDS[target]["code"],
             "disp": target,
-            "temp": parse_float(st.find('Temperature')),
-            "humidity": parse_float(st.find('Humidity')),
-            "rain_h": 0.0,
             "wind_speed": None,
             "gust_speed": None,
             "wind_dir": ""
         }
-
-        for rf in st.findall('Rainfall'):
-            type_node = rf.find('Type')
-            if type_node is not None and type_node.text and type_node.text.strip() == '4':
-                val = parse_float(rf)
-                if val is not None:
-                    item['rain_h'] = val
 
         for el in st.iter():
             tag = el.tag.split('}')[-1].lower()
@@ -336,12 +301,6 @@ def fetch_smg_weather(current_uvi=0.0):
                     v_node = el.find('.//Value')
                     if v_node is not None and v_node.text:
                         item['wind_dir'] = v_node.text.strip().upper()
-
-        ta = item['temp']
-        rh = item['humidity']
-        w = item['wind_speed'] or 0.0
-        item['apparent'] = calculate_apparent_temperature(ta, rh, w)
-        item['wbgt'] = estimate_wbgt(ta, rh, w, current_uvi)
 
         stations[target] = item
 
@@ -423,10 +382,22 @@ def compute_wind_index(stations_data):
     }
 
 # ==========================================
-# 5. Message Builders
+# 5. Message Builder
 # ==========================================
+def format_top3_text(top3_rows):
+    if not top3_rows:
+        return ""
+    
+    st_names = [r[0] for r in top3_rows]
+    ws_vals = [str(round(r[1])) for r in top3_rows]
+    gust_vals = [str(round(r[2])) if r[2] is not None else "--" for r in top3_rows]
 
-# --- 5.1 風力訊息 ---
+    names_str = "、".join(st_names[:-1]) + f"及{st_names[-1]}" if len(st_names) > 1 else st_names[0]
+    ws_str = "、".join(ws_vals[:-1]) + f"及{ws_vals[-1]}" if len(ws_vals) > 1 else ws_vals[0]
+    gust_str = "、".join(gust_vals[:-1]) + f"及{gust_vals[-1]}" if len(gust_vals) > 1 else gust_vals[0]
+
+    return f"在過去一小時，{names_str}分別錄得的最高持續風速為每小時{ws_str}公里，最高陣風分別為每小時{gust_str}公里。"
+
 def build_wind_message(pub_time_str, pub_dt, stations):
     wind_info = compute_wind_index(stations)
 
@@ -473,6 +444,12 @@ def build_wind_message(pub_time_str, pub_dt, stations):
         f"風力指數：{w_idx:.2f} ({wind_info['level']}, #{wind_info['grade']})",
         ""
     ]
+
+    # 添加過去一小時風速前三測站動態文字
+    top3_data = query_past_hour_top3(pub_dt)
+    if top3_data:
+        msg_lines.append(format_top3_text(top3_data))
+        msg_lines.append("")
 
     FULL_NAME_WIDTH = 19
 
@@ -526,7 +503,6 @@ def build_wind_message(pub_time_str, pub_dt, stations):
         if count > 0:
             tier_sub_items.append(f"{t_name}7中{count}")
 
-    # 修改為「24小時最高風力指數：」
     bridge_lines = [
         "",
         f"<code>24小時最高風力指數：{max_idx_str} {max_idx_time_str}</code>"
@@ -535,7 +511,6 @@ def build_wind_message(pub_time_str, pub_dt, stations):
     if tier_sub_items:
         bridge_lines.append(f"<code>{'、'.join(tier_sub_items)}</code>")
 
-    # 依風速由大至小輸出 7 條跨海大橋站點
     for st in b_summary["station_list"]:
         label = f"{st['name']} ({st['code']})"
         label_padded = pad_cjk(label, FULL_NAME_WIDTH)
@@ -553,124 +528,6 @@ def build_wind_message(pub_time_str, pub_dt, stations):
     msg_lines.extend(bridge_lines)
 
     return "\n".join(msg_lines)
-
-# --- 5.2 氣溫訊息 ---
-def build_temperature_message(pub_time_str, stations):
-    TARGET_WIDTH = 19
-
-    temp_list = []
-    for st_name, d in stations.items():
-        t = d.get('temp')
-        if t is None: continue
-        code = d.get('code', '')
-        label = f"{st_name} ({code})"
-
-        rank = None
-        icon = ""
-        if t >= 37.5: rank, icon = 1, "🔴"
-        elif 35.5 <= t < 37.5: rank, icon = 2, "🟠"
-        elif 32.5 <= t < 35.5: rank, icon = 3, "🟡"
-        elif t <= 3.4: rank, icon = 4, "🟣"
-        elif 3.5 <= t < 7.5: rank, icon = 5, "🔵"
-        elif 7.5 <= t <= 12.4: rank, icon = 6, "🟢"
-
-        if rank is not None:
-            temp_list.append({"label": label, "val": t, "rank": rank, "icon": icon})
-
-    app_list = []
-    for st_name, d in stations.items():
-        at = d.get('apparent')
-        if at is None: continue
-        code = d.get('code', '')
-        label = f"{st_name} ({code})"
-
-        rank = None
-        icon = ""
-        if at >= 37.5: rank, icon = 1, "🔴"
-        elif 35.5 <= at < 37.5: rank, icon = 2, "🟠"
-        elif at <= 3.4: rank, icon = 3, "🟣"
-        elif 3.5 <= at < 7.5: rank, icon = 4, "🔵"
-
-        if rank is not None:
-            app_list.append({"label": label, "val": at, "rank": rank, "icon": icon})
-
-    wbgt_list = []
-    for st_name, d in stations.items():
-        wb = d.get('wbgt')
-        if wb is None: continue
-        code = d.get('code', '')
-        label = f"{st_name} ({code})"
-
-        rank = None
-        icon = ""
-        if wb >= 32.5: rank, icon = 1, "⚫"
-        elif 30.5 <= wb < 32.5: rank, icon = 2, "🔴"
-        elif 29.5 <= wb < 30.5: rank, icon = 3, "🟠"
-
-        if rank is not None:
-            wbgt_list.append({"label": label, "val": wb, "rank": rank, "icon": icon})
-
-    if not temp_list and not app_list and not wbgt_list:
-        return None
-
-    msg_sections = [f"#氣溫 {pub_time_str}"]
-
-    if temp_list:
-        temp_list.sort(key=lambda x: (x["rank"], -x["val"] if x["rank"] <= 3 else x["val"]))
-        lines = ["<b>氣溫</b>"]
-        for item in temp_list:
-            pad = " " * max(1, TARGET_WIDTH - get_cjk_width(item['label']))
-            lines.append(f"<code>{item['label']}{pad}{item['val']:>4.1f} °C {item['icon']}</code>")
-        msg_sections.append("\n".join(lines))
-
-    if app_list:
-        app_list.sort(key=lambda x: (x["rank"], -x["val"] if x["rank"] <= 2 else x["val"]))
-        lines = ["<b>體感</b>"]
-        for item in app_list:
-            pad = " " * max(1, TARGET_WIDTH - get_cjk_width(item['label']))
-            lines.append(f"<code>{item['label']}{pad}{item['val']:>4.1f} °C {item['icon']}</code>")
-        msg_sections.append("\n".join(lines))
-
-    if wbgt_list:
-        wbgt_list.sort(key=lambda x: (x["rank"], -x["val"]))
-        lines = ["<b>暑熱</b>"]
-        for item in wbgt_list:
-            pad = " " * max(1, TARGET_WIDTH - get_cjk_width(item['label']))
-            lines.append(f"<code>{item['label']}{pad}{item['val']:>4.1f} {item['icon']}</code>")
-        msg_sections.append("\n".join(lines))
-
-    return "\n\n".join(msg_sections)
-
-# --- 5.3 降雨訊息 ---
-def build_rainfall_message(pub_time_str, stations):
-    TARGET_WIDTH = 19
-    rain_list = []
-
-    for st_name, d in stations.items():
-        r = d.get('rain_h')
-        if r is not None and r > 0.0:
-            code = d.get('code', '')
-            label = f"{st_name} ({code})"
-
-            icon = ""
-            if r >= 100.0: icon = " 🟣"
-            elif 80.0 <= r < 100.0: icon = " ⚫"
-            elif 50.0 <= r < 80.0: icon = " 🔴"
-            elif 20.0 <= r < 50.0: icon = " 🟡"
-
-            rain_list.append({"label": label, "val": r, "icon": icon})
-
-    if not rain_list:
-        return None
-
-    rain_list.sort(key=lambda x: x["val"], reverse=True)
-
-    lines = [f"#降雨 {pub_time_str}"]
-    for item in rain_list:
-        pad = " " * max(1, TARGET_WIDTH - get_cjk_width(item['label']))
-        lines.append(f"<code>{item['label']}{pad}{item['val']:>4.1f} mm{item['icon']}</code>")
-
-    return "\n".join(lines)
 
 # ==========================================
 # 6. Main Execution
@@ -692,8 +549,7 @@ def save_state(state):
         print(f"⚠️ 狀態寫入失敗: {e}")
 
 if __name__ == "__main__":
-    current_uvi = fetch_smg_uvi()
-    pub_time_str, pub_dt, stations = fetch_smg_weather(current_uvi=current_uvi)
+    pub_time_str, pub_dt, stations = fetch_smg_weather()
     if not pub_time_str or not stations:
         print("❌ 無法取得 SMG 數據，結束流程。")
         sys.exit(0)
@@ -711,26 +567,12 @@ if __name__ == "__main__":
     save_wind_data(pub_dt, stations, wind_calc["index"])
 
     wind_msg = build_wind_message(pub_time_str, pub_dt, stations)
-    temp_msg = build_temperature_message(pub_time_str, stations)
-    rain_msg = build_rainfall_message(pub_time_str, stations)
 
     if wind_msg:
         print("📤 滿足風力警報標準，發送 Telegram 訊息...")
         send_telegram(wind_msg)
     else:
         print("ℹ️ 未達風力推播標準。")
-
-    if temp_msg:
-        print("📤 滿足氣溫/體感/暑熱警報標準，發送 Telegram 訊息...")
-        send_telegram(temp_msg)
-    else:
-        print("ℹ️ 未達氣溫推播標準。")
-
-    if rain_msg:
-        print("📤 過去1小時雨量大於0，發送降雨 Telegram 訊息...")
-        send_telegram(rain_msg)
-    else:
-        print("ℹ️ 各站過去1小時雨量均為0。")
 
     state["last_pubdate"] = pub_time_str
     save_state(state)
