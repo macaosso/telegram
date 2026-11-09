@@ -107,6 +107,7 @@ def save_wind_data(pub_dt: datetime, stations_data: dict, wind_idx: float):
             INSERT INTO wind_records (timestamp, station_name, station_code, wind_speed, gust_speed, wind_index)
             VALUES (?, ?, ?, ?, ?, ?)
         """, rows)
+        # 僅保留最近 24 小時紀錄，避免 DB 無限膨脹
         cursor.execute("DELETE FROM wind_records WHERE timestamp < ?", (cutoff_str,))
         conn.commit()
 
@@ -116,12 +117,13 @@ def query_24h_bridge_summary(pub_dt: datetime):
         "max_index": None,
         "max_index_time": "",
         "tier_counts": {"颶風": 0, "暴風": 0, "烈風": 0, "強風": 0},
-        "stations": {}
+        "station_list": []
     }
 
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
 
+        # 查詢過去 24 小時全澳最高風力指數
         cursor.execute("""
             SELECT wind_index, timestamp
             FROM wind_records
@@ -138,6 +140,7 @@ def query_24h_bridge_summary(pub_dt: datetime):
             except Exception:
                 summary["max_index_time"] = "--:--"
 
+        # 查詢各跨海大橋過去 24 小時極值
         for b_name in BRIDGE_STATIONS:
             cursor.execute("""
                 SELECT wind_speed, timestamp
@@ -163,13 +166,18 @@ def query_24h_bridge_summary(pub_dt: datetime):
             max_g = g_row[0] if g_row else None
             max_g_time = datetime.fromisoformat(g_row[1]).astimezone(MACAU_TZ).strftime("%H:%M") if g_row else ""
 
-            summary["stations"][b_name] = {
+            code = STATION_COORDS.get(b_name, {}).get("code", "")
+
+            summary["station_list"].append({
+                "name": b_name,
+                "code": code,
                 "max_ws": max_ws,
                 "max_ws_time": max_ws_time,
                 "max_g": max_g,
                 "max_g_time": max_g_time
-            }
+            })
 
+            # 計算各級風力達標測站數（最高持續風速達到該門檻）
             if max_ws is not None:
                 if max_ws >= 117.5:
                     summary["tier_counts"]["颶風"] += 1
@@ -179,6 +187,15 @@ def query_24h_bridge_summary(pub_dt: datetime):
                     summary["tier_counts"]["烈風"] += 1
                 elif max_ws >= 40.5:
                     summary["tier_counts"]["強風"] += 1
+
+    # 依過去 24 小時最高風速 (max_ws) 降序排列，風速相同則比陣風 (max_g)
+    summary["station_list"].sort(
+        key=lambda x: (
+            x["max_ws"] if x["max_ws"] is not None else -1.0,
+            x["max_g"] if x["max_g"] is not None else -1.0
+        ),
+        reverse=True
+    )
 
     return summary
 
@@ -451,7 +468,6 @@ def build_wind_message(pub_time_str, pub_dt, stations):
         return None
 
     w_idx = wind_info['index']
-    # 標題與風力指數使用一般字體，等級前加上 #（例如：#強勁）
     msg_lines = [
         f"#風力 {pub_time_str}",
         f"風力指數：{w_idx:.2f} ({wind_info['level']}, #{wind_info['grade']})",
@@ -468,7 +484,6 @@ def build_wind_message(pub_time_str, pub_dt, stations):
 
         st_list.sort(key=lambda x: (x["ws_sort"], x["gust_sort"]), reverse=True)
 
-        # # 標籤行恢復為一般文字（非 code 字體）
         group_lines = [f"<b>#{tier_name}({len(st_list)})</b>"]
         for item in st_list:
             ws_val = item['ws']
@@ -483,12 +498,10 @@ def build_wind_message(pub_time_str, pub_dt, stations):
             label = f"{item['name']} ({item['code']})"
             label_padded = pad_cjk(label, FULL_NAME_WIDTH)
 
-            # 測站數據行使用 <code> 確保等寬對齊
             group_lines.append(f"<code>{label_padded} {ws_num} ({ws_f}) | {g_num} ({g_f})</code>")
 
         active_tier_blocks.append("\n".join(group_lines))
 
-    # 各分級群組之間空一行分隔
     msg_lines.append("\n\n".join(active_tier_blocks))
 
     # 大橋平均風速/陣風
@@ -513,24 +526,24 @@ def build_wind_message(pub_time_str, pub_dt, stations):
         if count > 0:
             tier_sub_items.append(f"{t_name}7中{count}")
 
+    # 修改為「24小時最高風力指數：」
     bridge_lines = [
         "",
-        f"<code>24小時橋上最高風力指數：{max_idx_str} {max_idx_time_str}</code>"
+        f"<code>24小時最高風力指數：{max_idx_str} {max_idx_time_str}</code>"
     ]
 
     if tier_sub_items:
         bridge_lines.append(f"<code>{'、'.join(tier_sub_items)}</code>")
 
-    for b_name in BRIDGE_STATIONS:
-        code = STATION_COORDS.get(b_name, {}).get("code", "")
-        label = f"{b_name} ({code})"
+    # 依風速由大至小輸出 7 條跨海大橋站點
+    for st in summary_stations := b_summary["station_list"]:
+        label = f"{st['name']} ({st['code']})"
         label_padded = pad_cjk(label, FULL_NAME_WIDTH)
 
-        st_info = b_summary["stations"].get(b_name, {})
-        max_ws = st_info.get("max_ws")
-        max_ws_t = st_info.get("max_ws_time", "--:--")
-        max_g = st_info.get("max_g")
-        max_g_t = st_info.get("max_g_time", "--:--")
+        max_ws = st["max_ws"]
+        max_ws_t = st["max_ws_time"] if st["max_ws_time"] else "--:--"
+        max_g = st["max_g"]
+        max_g_t = st["max_g_time"] if st["max_g_time"] else "--:--"
 
         ws_str = f"{round(max_ws):>2} ({max_ws_t})" if max_ws is not None else " -- (--:--)"
         g_str = f"{round(max_g):>2} ({max_g_t})" if max_g is not None else " -- (--:--)"
@@ -600,7 +613,6 @@ def build_temperature_message(pub_time_str, stations):
     if not temp_list and not app_list and not wbgt_list:
         return None
 
-    # # 標題使用一般字體
     msg_sections = [f"#氣溫 {pub_time_str}"]
 
     if temp_list:
