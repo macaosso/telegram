@@ -111,7 +111,7 @@ def save_wind_data(pub_dt: datetime, stations_data: dict, wind_idx: float):
 
 def query_past_hour_top3(pub_dt: datetime):
     """
-    查詢過去 1 小時最高持續風速排名前 3 的測站，並取出該測站過去 1 小時內的最高風速與最高陣風。
+    查詢過去 1 小時最高持續風速排名前 3 的測站，並取出該測站過去 1 小時內的最高持續風速與最高陣風。
     """
     cutoff_str = (pub_dt - timedelta(hours=1)).isoformat()
 
@@ -384,10 +384,11 @@ def compute_wind_index(stations_data):
 # ==========================================
 # 5. Message Builder
 # ==========================================
-def format_top3_text(top3_rows):
+def format_top3_text(pub_dt: datetime, top3_rows: list):
     if not top3_rows:
         return ""
     
+    time_str = pub_dt.strftime("%H時%M分")
     st_names = [r[0] for r in top3_rows]
     ws_vals = [str(round(r[1])) for r in top3_rows]
     gust_vals = [str(round(r[2])) if r[2] is not None else "--" for r in top3_rows]
@@ -396,7 +397,7 @@ def format_top3_text(top3_rows):
     ws_str = "、".join(ws_vals[:-1]) + f"及{ws_vals[-1]}" if len(ws_vals) > 1 else ws_vals[0]
     gust_str = "、".join(gust_vals[:-1]) + f"及{gust_vals[-1]}" if len(gust_vals) > 1 else gust_vals[0]
 
-    return f"在過去一小時，{names_str}分別錄得的最高持續風速為每小時{ws_str}公里，最高陣風分別為每小時{gust_str}公里。"
+    return f"在{time_str}的過去一小時，{names_str}分別錄得的最高持續風速為每小時{ws_str}公里，最高陣風分別為每小時{gust_str}公里。"
 
 def build_wind_message(pub_time_str, pub_dt, stations):
     wind_info = compute_wind_index(stations)
@@ -444,12 +445,6 @@ def build_wind_message(pub_time_str, pub_dt, stations):
         f"風力指數：{w_idx:.2f} ({wind_info['level']}, #{wind_info['grade']})",
         ""
     ]
-
-    # 添加過去一小時風速前三測站動態文字
-    top3_data = query_past_hour_top3(pub_dt)
-    if top3_data:
-        msg_lines.append(format_top3_text(top3_data))
-        msg_lines.append("")
 
     FULL_NAME_WIDTH = 19
 
@@ -526,6 +521,15 @@ def build_wind_message(pub_time_str, pub_dt, stations):
         bridge_lines.append(f"<code>{label_padded} {ws_str} | {g_str}</code>")
 
     msg_lines.extend(bridge_lines)
+
+    # 於訊息最底部加入過去 1 小時最高持續風速前 3 名測站摘要（使用 <code> 保持字體一致）
+    top3_data = query_past_hour_top3(pub_dt)
+    if top3_data:
+        top3_text = format_top3_text(pub_dt, top3_data)
+        msg_lines.extend([
+            "",
+            f"<code>{top3_text}</code>"
+        ])
 
     return "\n".join(msg_lines)
 
