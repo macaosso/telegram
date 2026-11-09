@@ -339,9 +339,12 @@ def get_cjk_width(s):
             width += 1
     return width
 
-def pad_cjk(text, target_width):
-    w = get_cjk_width(text)
-    return text + (" " * max(0, target_width - w))
+def pad_station(name):
+    """
+    澳門站名簡稱最長為 4 個字（如「友誼橋北」、「嘉樂庇橋」）。
+    不足 4 個字的站名補入全形空格 '\\u3000'，保證在任何中文字型下等寬對齊。
+    """
+    return name + ("\u3000" * max(0, 4 - len(name)))
 
 # ==========================================
 # 4. 蒲福氏風級與風力指數計算
@@ -409,7 +412,7 @@ def compute_wind_index(stations_data):
 # 5. Message Builders
 # ==========================================
 
-# --- 5.1 風力訊息 ---
+# --- 5.1 風力訊息（純文字排版，無代碼框，無折行） ---
 def build_wind_message(pub_time_str, pub_dt, stations):
     wind_info = compute_wind_index(stations)
 
@@ -457,8 +460,6 @@ def build_wind_message(pub_time_str, pub_dt, stations):
         ""
     ]
 
-    NAME_COL_WIDTH = 8 
-
     for tier_name, _ in tier_defs:
         st_list = tier_stations[tier_name]
         if not st_list:
@@ -466,7 +467,7 @@ def build_wind_message(pub_time_str, pub_dt, stations):
 
         st_list.sort(key=lambda x: (x["ws_sort"], x["gust_sort"]), reverse=True)
 
-        group_lines = [f"<b>#{tier_name}({len(st_list)})</b>", "<pre>"]
+        group_lines = [f"<b>#{tier_name}({len(st_list)})</b>"]
         for item in st_list:
             ws_val = item['ws']
             g_val = item['gust']
@@ -477,10 +478,9 @@ def build_wind_message(pub_time_str, pub_dt, stations):
             ws_num = f"{ws_val:>4.1f}" if ws_val is not None else "  --"
             g_num = f"{g_val:>4.1f}" if g_val is not None else "  --"
 
-            label = pad_cjk(item['disp'], NAME_COL_WIDTH)
+            label = pad_station(item['disp'])
             group_lines.append(f"{label} {ws_num} ({ws_f}) | {g_num} ({g_f})")
 
-        group_lines.append("</pre>")
         msg_lines.append("\n".join(group_lines))
 
     b_avg_ws = wind_info['bridge_avg_ws']
@@ -511,10 +511,9 @@ def build_wind_message(pub_time_str, pub_dt, stations):
     if tier_sub_items:
         bridge_lines.append("、".join(tier_sub_items))
 
-    bridge_lines.append("<pre>")
     for b_name in BRIDGE_STATIONS:
         disp_name = STATION_COORDS.get(b_name, {}).get("disp", b_name)
-        label = pad_cjk(disp_name, NAME_COL_WIDTH)
+        label = pad_station(disp_name)
 
         st_info = b_summary["stations"].get(b_name, {})
         max_ws = st_info.get("max_ws")
@@ -527,7 +526,6 @@ def build_wind_message(pub_time_str, pub_dt, stations):
 
         bridge_lines.append(f"{label} {ws_str} | {g_str}")
 
-    bridge_lines.append("</pre>")
     msg_lines.extend(bridge_lines)
 
     return "\n".join(msg_lines)
