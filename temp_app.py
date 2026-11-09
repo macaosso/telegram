@@ -151,7 +151,8 @@ def get_cjk_width(s):
 
 def pad_cjk(text, target_width):
     w = get_cjk_width(text)
-    return text + (" " * max(1, target_width - w))
+    # 站名靠左，右邊補空格至指定寬度
+    return text + (" " * max(0, target_width - w))
 
 def fetch_smg_weather():
     url = "https://xml.smg.gov.mo/c_actualweather.xml"
@@ -205,9 +206,10 @@ def fetch_smg_weather():
 # 4. Message Builder
 # ==========================================
 def build_temperature_message(pub_time_str, pub_dt, stations):
-    FULL_NAME_WIDTH = 19
-    st_records = []
+    # 「紀念孫中山公園 (DP)」寬度為 19，設定 20 確保最長名稱後至少隔開 1 個半形空格
+    STATION_COL_WIDTH = 20
 
+    st_records = []
     for st_name, d in stations.items():
         curr_t = d.get("temp")
         min_t, min_t_time = query_24h_min_temp(pub_dt, st_name)
@@ -238,13 +240,14 @@ def build_temperature_message(pub_time_str, pub_dt, stations):
 
     for item in st_records:
         label = f"{item['name']} ({item['code']})"
-        label_padded = pad_cjk(label, FULL_NAME_WIDTH)
+        label_col = pad_cjk(label, STATION_COL_WIDTH)
 
         curr_str = f"{item['curr_temp']:>4.1f}" if item['curr_temp'] is not None else "  --"
         min_str = f"{item['min_temp']:>4.1f}" if item['min_temp'] is not None else "  --"
         time_str = f"({item['min_temp_time']})"
 
-        msg_lines.append(f"<code>{label_padded} {curr_str} | {min_str} {time_str}</code>")
+        # 結構: [站名(代碼) 靠左補滿20寬] [當前溫 4寬] | [最低溫 4寬] [時間 7寬]
+        msg_lines.append(f"<code>{label_col}{curr_str} | {min_str} {time_str}</code>")
 
     return "\n".join(msg_lines)
 
