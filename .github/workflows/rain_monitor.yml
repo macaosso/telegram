@@ -1,0 +1,79 @@
+name: Rain Alert Monitor
+
+on:
+  schedule:
+    - cron: '0 */5 * * *'
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Macau
+
+concurrency:
+  group: rain-realtime-monitor
+  cancel-in-progress: false
+
+jobs:
+  poll-and-alert:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+      - name: 檢出倉庫代碼
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 設定 Python 環境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 安裝依賴庫
+        run: |
+          pip install -r requirements.txt
+
+      - name: 執行高頻輪詢 (每 60 秒檢測一次 XML 更新)
+        env:
+          RAIN_API_TOKEN: ${{ secrets.RAIN_API_TOKEN }}
+        run: |
+          END_TIME=$(($(date +%s) + 17100))
+          INTERVAL=60
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          while [ $(date +%s) -lt $END_TIME ]; do
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 檢查 SMG XML 更新..."
+            python rain_app.py
+
+            if [ -n "$(git status --porcelain rain_state.json rain.db)" ]; then
+              git add rain_state.json rain.db
+              git commit -m "chore: sync weather state and rain db [skip ci]" || true
+              git pull --rebase origin main || true
+              git push origin main || echo "Push skipped, will retry on next run."
+            fi
+
+            sleep $INTERVAL
+          done
+
+      - name: 最終數據保存
+        if: always()
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          if [ -n "$(git status --porcelain rain_state.json rain.db)" ]; then
+            git add rain_state.json rain.db
+            git commit -m "chore: final sync before handing over [skip ci]" || true
+            git pull --rebase origin main || true
+            git push origin main || echo "Final push failed."
+          fi
+
+      - name: 4.5 小時結束，立即無縫喚醒下一個任務
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run "Rain Alert Monitor" --ref main || echo "觸發下一輪任務失敗"
